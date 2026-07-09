@@ -5,11 +5,11 @@
 
 # 📊 aistats 📊
 
-A small self-hosted dashboard for your CLI AI usage: recent requests, token spend, served models, per-account rate limits, charts, prompt groups, and a pace estimator that warns before a limit is hit.
+a small self-hosted dashboard for your cli ai usage: recent requests, token spend, served models, per-account rate limits, charts, prompt groups, and a pace estimator that warns before a limit is hit.
 
 ## requirements
 
-aistats reads the per-request logs of a running [cliproxyapi](https://github.com/router-for-me/CLIProxyAPI) instance, so that is the only requirement: cliproxyapi installed with request logging enabled. point a vhost at the project so that `/admin` is served locally by php. If you also want the proxied `/v1` api reachable from outside, expose cliproxyapi through the same host; otherwise leave everything but `/admin` closed.
+aistats reads the per-request logs of a running [cliproxyapi](https://github.com/router-for-me/CLIProxyAPI) instance with request logging enabled. point a vhost at the project so that `/admin` is served locally by php. if you also want the proxied `/v1` api reachable from outside, expose cliproxyapi through the same host; otherwise leave everything but `/admin` closed.
 
 ## setup
 
@@ -17,5 +17,6 @@ aistats reads the per-request logs of a running [cliproxyapi](https://github.com
 git clone https://github.com/vielhuber/aistats.git .
 composer install
 npm install
-cp .env.example .env && vim .env
+cp .env.example .env
+vim .env
 ```
