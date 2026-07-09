@@ -1,0 +1,9 @@
+# hardening for the /admin panel (all log/data access already requires a session in index.php)
+
+# no directory listing (e.g. of node_modules)
+Options -Indexes
+
+# never serve dotfiles
+<FilesMatch "^\.">
+    Require all denied
+</FilesMatch>

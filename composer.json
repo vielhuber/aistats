@@ -1,0 +1,9 @@
+{
+    "name": "vielhuber/aistats",
+    "description": "A small self-hosted dashboard for your CLI AI usage.",
+    "license": "MIT",
+    "require": {
+        "php": ">=8.3",
+        "vielhuber/aihelper": "^4.1.6"
+    }
+}
