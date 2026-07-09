@@ -3,7 +3,7 @@
 [![License](https://img.shields.io/github/license/vielhuber/aistats)](https://github.com/vielhuber/aistats/blob/main/LICENSE.md)
 [![Last Commit](https://img.shields.io/github/last-commit/vielhuber/aistats)](https://github.com/vielhuber/aistats/commits)
 
-# 🤖 aistats 🤖
+# 📊 aistats 📊
 
 A small self-hosted dashboard for your CLI AI usage: recent requests, token spend, served models, per-account rate limits, charts, prompt groups, and a pace estimator that warns before a limit is hit.
 
