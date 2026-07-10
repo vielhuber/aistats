@@ -499,7 +499,9 @@ final class Admin
                     'used' => $used,
                     'projected' => $projected,
                     'resetTs' => $resetTs,
-                    'hitTs' => $hitTs
+                    'hitTs' => $hitTs,
+                    // rate reduction needed to reach exactly 100% at reset: allowed/current = (100-used)/(projected-used)
+                    'throttle' => $projected > 100 ? (int) ceil((1 - (100 - $used) / ($projected - $used)) * 100) : 0
                 ];
                 // surface the binding constraint: among windows projected to blow past 100%, the one
                 // that hits SOONEST (you get blocked by it first); if none exceed, the highest projected
@@ -524,6 +526,27 @@ final class Admin
 
         if (!$this->idle && $this->estimate !== null) {
             $this->estimateSeverity = $this->estimate['projected'] >= 100 ? 'crit' : ($this->estimate['projected'] >= 80 ? 'warn' : 'ok');
+        }
+        if ($this->estimateSeverity === 'crit') {
+            // how long you would sit blocked between hitting the limit and the window reset
+            $gap = max(0, $this->estimate['resetTs'] - $this->estimate['hitTs']);
+            $gapParts = [];
+            if (intdiv($gap, 86400) > 0) {
+                $gapParts[] = intdiv($gap, 86400) . 'd';
+            }
+            if ($gapParts !== [] || intdiv($gap % 86400, 3600) > 0) {
+                $gapParts[] = intdiv($gap % 86400, 3600) . 'h';
+            }
+            if ($gapParts !== [] || intdiv($gap % 3600, 60) > 0) {
+                $gapParts[] = intdiv($gap % 3600, 60) . 'm';
+            }
+            $gapParts[] = ($gap % 60) . 's';
+            $this->estimate['gapLabel'] = implode(' ', $gapParts);
+            $throttle = $this->estimate['throttle'];
+            $this->estimate['throttleLabel'] =
+                $throttle >= 75
+                    ? 'throttle hard'
+                    : ($throttle >= 50 ? 'throttle strongly' : ($throttle >= 25 ? 'throttle moderately' : 'throttle a little'));
         }
 
         // recommend the workhorse (claude vs codex) with the most headroom = lowest binding usage %
@@ -854,7 +877,7 @@ final class Admin
                         <?php elseif ($this->estimate === null): ?>
                             too early to project
                         <?php elseif ($this->estimateSeverity === 'crit'): ?>
-                            ⛔ at this pace: <?= $h($this->estimate['tool']) ?> hits in <span class="countdown" data-reset="<?= (int) $this->estimate['hitTs'] ?>"></span>!
+                            ⛔ at this pace: <?= $h($this->estimate['tool']) ?> <?= $h($this->estimate['type']) ?> hits in <span class="countdown" data-reset="<?= (int) $this->estimate['hitTs'] ?>"></span>! · gap <?= $h($this->estimate['gapLabel']) ?> · reset in <span class="countdown" data-reset="<?= (int) $this->estimate['resetTs'] ?>"></span> · <span title="reduce pace by at least <?= (int) $this->estimate['throttle'] ?>% to make it to the reset"><?= $h($this->estimate['throttleLabel']) ?></span>
                         <?php elseif ($this->estimateSeverity === 'warn'): ?>
                             trending: <?= $h($this->estimate['tool']) ?> <?= $h($this->estimate['type']) ?> ≈<?= $fmt(round($this->estimate['projected'])) ?>% by reset
                         <?php else: ?>
