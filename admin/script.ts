@@ -1,4 +1,6 @@
-'use strict';
+import { Chart, registerables } from 'chart.js';
+
+Chart.register(...registerables);
 
 class Admin {
     static REFRESH_SECONDS = 30;
@@ -11,16 +13,19 @@ class Admin {
     static SELECTOR_COUNTDOWN = '.countdown[data-reset]';
 
     static PALETTE = ['#3b6ef5', '#4ade80', '#fbbf24', '#f87171', '#a78bfa', '#22d3ee', '#f472b6', '#94a3b8', '#facc15', '#34d399'];
-    static STATUS_COLORS = { '2xx': '#4ade80', '4xx': '#fbbf24', '5xx': '#f87171', other: '#94a3b8' };
+    static STATUS_COLORS: Record<string, string> = { '2xx': '#4ade80', '4xx': '#fbbf24', '5xx': '#f87171', other: '#94a3b8' };
     static GRID = '#21252e';
     static TICK = '#8a92a3';
 
-    constructor() {
-        this.refreshTimer = null;
-        this.sort = { index: -1, dir: 0 };
-        this.type = 'text';
-        this.page = 1;
-    }
+    refreshTimer: ReturnType<typeof setTimeout> | null = null;
+    sort = { index: -1, dir: 0 };
+    type = 'text';
+    page = 1;
+    $refresh!: HTMLInputElement | null;
+    $tbody!: HTMLElement;
+    $pagination!: HTMLElement | null;
+    originalRows!: HTMLTableRowElement[];
+    axes: any;
 
     init() {
         this.bindRowClicks();
@@ -32,12 +37,12 @@ class Admin {
 
     // open the raw log when a row is clicked (ignore clicks on links, e.g. the filters)
     bindRowClicks() {
-        document.querySelectorAll(Admin.SELECTOR_ROW).forEach($row => {
+        document.querySelectorAll<HTMLElement>(Admin.SELECTOR_ROW).forEach($row => {
             $row.addEventListener('click', event => {
-                if (event.target.closest('a')) {
+                if ((event.target as HTMLElement).closest('a')) {
                     return;
                 }
-                window.open($row.getAttribute('data-raw'), '_blank');
+                window.open($row.getAttribute('data-raw')!, '_blank');
             });
         });
     }
@@ -59,28 +64,28 @@ class Admin {
             clearTimeout(this.refreshTimer);
             this.refreshTimer = null;
         }
-        if (this.$refresh.checked) {
+        if (this.$refresh!.checked) {
             this.refreshTimer = setTimeout(() => location.reload(), Admin.REFRESH_SECONDS * 1000);
         }
     }
 
     // live "time until reset" tickers
     bindCountdowns() {
-        let $els = document.querySelectorAll(Admin.SELECTOR_COUNTDOWN);
+        let $els = document.querySelectorAll<HTMLElement>(Admin.SELECTOR_COUNTDOWN);
         if (!$els.length) {
             return;
         }
         let tick = () => {
             let now = Math.floor(Date.now() / 1000);
             $els.forEach($el => {
-                $el.textContent = this.formatDuration(parseInt($el.getAttribute('data-reset'), 10) - now);
+                $el.textContent = this.formatDuration(parseInt($el.getAttribute('data-reset')!, 10) - now);
             });
         };
         tick();
         setInterval(tick, 1000);
     }
 
-    formatDuration(seconds) {
+    formatDuration(seconds: number) {
         if (seconds <= 0) {
             return 'now';
         }
@@ -108,20 +113,20 @@ class Admin {
         if (!$table) {
             return;
         }
-        this.$tbody = $table.querySelector('tbody');
+        this.$tbody = $table.querySelector('tbody')!;
         if (this.$tbody.querySelector('.empty')) {
             return;
         }
         this.originalRows = Array.from(this.$tbody.querySelectorAll('tr'));
         this.$pagination = document.getElementById('pagination');
-        $table.querySelectorAll('th[data-sort]').forEach($th => {
+        $table.querySelectorAll<HTMLElement>('th[data-sort]').forEach($th => {
             $th.addEventListener('click', () => this.onSort($th));
         });
         this.renderTable();
     }
 
-    onSort($th) {
-        let index = $th.cellIndex;
+    onSort($th: HTMLElement) {
+        let index = ($th as HTMLTableCellElement).cellIndex;
         if (this.sort.index !== index) {
             this.sort = { index: index, dir: -1 };
         } else if (this.sort.dir === -1) {
@@ -131,10 +136,10 @@ class Admin {
         } else {
             this.sort = { index: index, dir: -1 };
         }
-        this.type = $th.getAttribute('data-sort');
+        this.type = $th.getAttribute('data-sort')!;
         document.querySelectorAll('th[data-sort] .arrow').forEach($arrow => ($arrow.textContent = ''));
         if (this.sort.dir !== 0) {
-            $th.querySelector('.arrow').textContent = this.sort.dir === -1 ? ' ↓' : ' ↑';
+            $th.querySelector('.arrow')!.textContent = this.sort.dir === -1 ? ' ↓' : ' ↑';
         }
         this.page = 1;
         this.renderTable();
@@ -149,14 +154,14 @@ class Admin {
         return this.originalRows.slice().sort((a, b) => {
             let av = this.cellValue(a, index, type);
             let bv = this.cellValue(b, index, type);
-            let cmp = type === 'num' ? av - bv : String(av).localeCompare(String(bv));
+            let cmp = type === 'num' ? (av as number) - (bv as number) : String(av).localeCompare(String(bv));
             return this.sort.dir === -1 ? -cmp : cmp;
         });
     }
 
-    cellValue($row, index, type) {
+    cellValue($row: HTMLTableRowElement, index: number, type: string) {
         let $cell = $row.cells[index];
-        let text = $cell ? $cell.textContent.trim() : '';
+        let text = $cell ? $cell.textContent!.trim() : '';
         if (type === 'num') {
             let value = parseFloat(text.replace(/\./g, '').replace(',', '.'));
             return isNaN(value) ? -Infinity : value;
@@ -175,7 +180,7 @@ class Admin {
         this.renderPagination(pages);
     }
 
-    renderPagination(pages) {
+    renderPagination(pages: number) {
         if (!this.$pagination) {
             return;
         }
@@ -183,7 +188,7 @@ class Admin {
         if (pages <= 1) {
             return;
         }
-        let addButton = (label, page, options = {}) => {
+        let addButton = (label: string, page: number, options: { disabled?: boolean; active?: boolean } = {}) => {
             let $button = document.createElement('button');
             $button.textContent = label;
             if (options.disabled) {
@@ -198,13 +203,13 @@ class Admin {
                     this.renderTable();
                 });
             }
-            this.$pagination.appendChild($button);
+            this.$pagination!.appendChild($button);
         };
         let addGap = () => {
             let $gap = document.createElement('span');
             $gap.textContent = '…';
             $gap.className = 'muted';
-            this.$pagination.appendChild($gap);
+            this.$pagination!.appendChild($gap);
         };
 
         addButton('‹ prev', this.page - 1, { disabled: this.page === 1 });
@@ -224,10 +229,10 @@ class Admin {
 
     renderCharts() {
         let $data = document.querySelector(Admin.SELECTOR_CHARTDATA);
-        if (!$data || typeof Chart === 'undefined') {
+        if (!$data) {
             return;
         }
-        let data = JSON.parse($data.textContent);
+        let data = JSON.parse($data.textContent!);
 
         Chart.defaults.color = Admin.TICK;
         Chart.defaults.font.family = 'Consolas, Menlo, Monaco, "SF Mono", monospace';
@@ -238,12 +243,12 @@ class Admin {
 
         this.bar('chartHour', data.byHour.labels, data.byHour.data);
         this.doughnut('chartModel', data.byModel.labels, data.byModel.data);
-        this.doughnut('chartStatus', data.byStatus.labels, data.byStatus.data, data.byStatus.labels.map($label => Admin.STATUS_COLORS[$label] || '#94a3b8'));
+        this.doughnut('chartStatus', data.byStatus.labels, data.byStatus.data, data.byStatus.labels.map(($label: string) => Admin.STATUS_COLORS[$label] || '#94a3b8'));
         this.hbar('chartGroup', data.byGroup.labels, data.byGroup.data);
     }
 
-    bar(id, labels, values, color) {
-        let $canvas = document.getElementById(id);
+    bar(id: string, labels: string[], values: number[], color?: string) {
+        let $canvas = document.getElementById(id) as HTMLCanvasElement | null;
         if (!$canvas) {
             return;
         }
@@ -254,8 +259,8 @@ class Admin {
         });
     }
 
-    hbar(id, labels, values) {
-        let $canvas = document.getElementById(id);
+    hbar(id: string, labels: string[], values: number[]) {
+        let $canvas = document.getElementById(id) as HTMLCanvasElement | null;
         if (!$canvas) {
             return;
         }
@@ -272,8 +277,8 @@ class Admin {
         });
     }
 
-    doughnut(id, labels, values, colors) {
-        let $canvas = document.getElementById(id);
+    doughnut(id: string, labels: string[], values: number[], colors?: string[]) {
+        let $canvas = document.getElementById(id) as HTMLCanvasElement | null;
         if (!$canvas) {
             return;
         }

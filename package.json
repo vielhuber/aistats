@@ -1,8 +1,13 @@
 {
+    "scripts": {
+        "prod": "esbuild admin/script.ts --bundle --minify --outfile=admin/bundle.js && sass admin/style.scss admin/bundle.css --style=compressed --no-source-map"
+    },
     "dependencies": {
         "chart.js": "^4"
     },
     "devDependencies": {
+        "esbuild": ">=0.28",
+        "sass": ">=1.80",
         "prettier": ">=3",
         "@prettier/plugin-php": ">=0.25"
     }

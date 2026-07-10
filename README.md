@@ -17,6 +17,7 @@ aistats reads the per-request logs of a running [cliproxyapi](https://github.com
 git clone https://github.com/vielhuber/aistats.git .
 composer install
 npm install
+npm run prod
 cp .env.example .env
 vim .env
 ```

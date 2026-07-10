@@ -783,7 +783,7 @@ final class Admin
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <title>aistats</title>
             <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%230f1115'/><rect x='3' y='8' width='2.5' height='5' fill='%234dd2ff'/><rect x='6.75' y='5' width='2.5' height='8' fill='%234ade80'/><rect x='10.5' y='3' width='2.5' height='10' fill='%23fbbf24'/></svg>">
-            <link rel="stylesheet" href="style.css">
+            <link rel="stylesheet" href="bundle.css">
         </head>
         <body>
         <div class="login">
@@ -816,7 +816,7 @@ final class Admin
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <title>aistats</title>
             <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%230f1115'/><rect x='3' y='8' width='2.5' height='5' fill='%234dd2ff'/><rect x='6.75' y='5' width='2.5' height='8' fill='%234ade80'/><rect x='10.5' y='3' width='2.5' height='10' fill='%23fbbf24'/></svg>">
-            <link rel="stylesheet" href="style.css">
+            <link rel="stylesheet" href="bundle.css">
         </head>
         <body>
         <header>
@@ -1007,8 +1007,7 @@ final class Admin
             <div class="pagination" id="pagination"></div>
         </div>
         <script id="chartdata" type="application/json"><?= json_encode($this->chartData, JSON_HEX_TAG | JSON_UNESCAPED_UNICODE) ?></script>
-        <script src="node_modules/chart.js/dist/chart.umd.js"></script>
-        <script src="script.js"></script>
+        <script src="bundle.js"></script>
         </body>
         </html>
         <?php
