@@ -10,6 +10,13 @@ final class Admin
     private string $logsDir = '/root/.cli-proxy-api/logs';
     private array $groupPalette = ['#2b3a67', '#234d3a', '#5c4a1e', '#5c2626', '#3b2b52', '#1e4a52', '#5c2b46', '#33384a', '#4a4420', '#2f4d2f', '#472b5c', '#264b4b'];
 
+    // provider, calibration model, auth file globs — shared by usage limits, reset credits and the reset action
+    private const USAGE_TOOL_CONFIG = [
+        'Claude' => ['anthropic', 'claude-sonnet-4-5-20250929', ['/root/.claude/.credentials.json', '/root/.cli-proxy-api/claude*.json']],
+        'Codex' => ['openai', 'gpt-5-codex', ['/root/.codex/auth.json', '/root/.cli-proxy-api/codex*.json']],
+        'Antigravity' => ['google', 'antigravity-gemini', ['/root/.gemini/antigravity-cli/antigravity-oauth-token', '/root/.cli-proxy-api/antigravity*.json']]
+    ];
+
     private string $authUser = '';
     private string $authPass = '';
 
@@ -37,6 +44,7 @@ final class Admin
     private array $endpointModels = [];
     private array $modelsByFamily = [];
     private array $usageTools = [];
+    private array $resetCredits = [];
 
     private ?array $estimate = null;
     private int $recentRequests = 0;
@@ -73,6 +81,7 @@ final class Admin
             return;
         }
         $this->serveRawLog();
+        $this->handleReset();
         $this->collect();
         $this->render();
     }
@@ -158,6 +167,40 @@ final class Admin
         } else {
             readfile($target);
         }
+        exit();
+    }
+
+    // redeem one rate-limit reset credit, then redirect (PRG) so refreshes don't re-trigger it
+    private function handleReset(): void
+    {
+        if (($_POST['action'] ?? '') !== 'reset') {
+            return;
+        }
+        $toolLabel = (string) ($_POST['tool'] ?? '');
+        $toolConfig = self::USAGE_TOOL_CONFIG[$toolLabel] ?? null;
+        $result = null;
+        if ($toolConfig !== null && method_exists(aihelper::class, 'triggerCliUsageReset')) {
+            $result = aihelper::create(
+                provider: $toolConfig[0],
+                model: $toolConfig[1],
+                api_key: 'x'
+            )->triggerCliUsageReset();
+        }
+        // drop the cached usage so the refreshed limits and credit count show right away
+        @unlink(
+            sys_get_temp_dir() .
+                '/aistats-usage-' .
+                strtolower($toolLabel) .
+                '-' .
+                (function_exists('posix_geteuid') ? posix_geteuid() : getmyuid()) .
+                '.json'
+        );
+        header(
+            'Location: ' .
+                strtok((string) $_SERVER['REQUEST_URI'], '?') .
+                '?resetresult=' .
+                rawurlencode($result === null ? 'unsupported' : (string) ($result['status'] ?? 'error'))
+        );
         exit();
     }
 
@@ -464,11 +507,7 @@ final class Admin
     // a tool is listed when its auth file is present, so it never silently disappears on a transient error
     private function fetchUsageLimits(): void
     {
-        foreach ([
-            'Claude' => ['anthropic', 'claude-sonnet-4-5-20250929', ['/root/.claude/.credentials.json', '/root/.cli-proxy-api/claude*.json']],
-            'Codex' => ['openai', 'gpt-5-codex', ['/root/.codex/auth.json', '/root/.cli-proxy-api/codex*.json']],
-            'Antigravity' => ['google', 'antigravity-gemini', ['/root/.gemini/antigravity-cli/antigravity-oauth-token', '/root/.cli-proxy-api/antigravity*.json']]
-        ] as $toolLabel => $toolConfig) {
+        foreach (self::USAGE_TOOL_CONFIG as $toolLabel => $toolConfig) {
             $hasAuth = false;
             foreach ($toolConfig[2] as $globPattern) {
                 if (!empty(glob($globPattern))) {
@@ -493,19 +532,27 @@ final class Admin
                 '.json';
             $cached = is_file($cacheFile) ? json_decode((string) file_get_contents($cacheFile), true) : null;
             $cachedLimits = is_array($cached) && !empty($cached['limits']) ? $cached['limits'] : null;
+            $cachedCredits = is_array($cached) && is_array($cached['reset_credits'] ?? null) ? $cached['reset_credits'] : null;
             $lastAttempt = is_array($cached) ? (int) ($cached['time'] ?? 0) : 0;
             // a good result stays fresh 5 min; while we have none yet, still back off 90s between
             // attempts so a rate-limited (429) endpoint isn't re-hit on every 30s refresh
             $ttl = $cachedLimits !== null ? 300 : 90;
             if ($cached !== null && time() - $lastAttempt < $ttl) {
                 $this->usageTools[$toolLabel] = $cachedLimits;
+                $this->resetCredits[$toolLabel] = $cachedCredits;
                 continue;
             }
-            $limits =
-                aihelper::create(provider: $toolConfig[0], model: $toolConfig[1], api_key: 'x')->getCliUsageLimits() ?: null;
+            $helper = aihelper::create(provider: $toolConfig[0], model: $toolConfig[1], api_key: 'x');
+            $limits = $helper->getCliUsageLimits() ?: null;
+            // null for providers without redeemable reset credits — those never render a reset link
+            $credits = method_exists($helper, 'getCliUsageResetCredits') ? $helper->getCliUsageResetCredits() : null;
             // record every attempt time (throttles failures too); keep the last good result on failure
-            @file_put_contents($cacheFile, json_encode(['time' => time(), 'limits' => $limits ?? $cachedLimits]));
+            @file_put_contents(
+                $cacheFile,
+                json_encode(['time' => time(), 'limits' => $limits ?? $cachedLimits, 'reset_credits' => $credits ?? $cachedCredits])
+            );
             $this->usageTools[$toolLabel] = $limits ?? $cachedLimits;
+            $this->resetCredits[$toolLabel] = $credits ?? $cachedCredits;
         }
     }
 
@@ -925,6 +972,12 @@ final class Admin
                 </div>
                 <div class="panel">
                     <h2>Usage limits</h2>
+                    <?php if (($_GET['resetresult'] ?? '') !== ''): ?>
+                        <?php $resetResult = (string) $_GET['resetresult']; ?>
+                        <div class="recommend"<?= $resetResult !== 'reset' ? ' style="background:#2b1417;border-color:#5c2626;color:#f0a0a0"' : '' ?>>
+                            <?= $resetResult === 'reset' ? '✅ reset credit redeemed — limits are refreshing' : '⚠️ reset failed: ' . $h($resetResult) ?>
+                        </div>
+                    <?php endif; ?>
                     <?php if ($this->recommended !== null): ?>
                         <div class="recommend">✅ recommended model currently: <b><?= $h($this->recommended['name']) ?></b> · <?= $fmt(round($this->recommended['free'])) ?>% free</div>
                     <?php endif; ?>
@@ -947,7 +1000,20 @@ final class Admin
                         <div class="muted">No usage data available.</div>
                     <?php endif; ?>
                     <?php foreach ($this->usageTools as $toolLabel => $limits): ?>
-                        <div class="toolname"><?= $h($toolLabel) ?></div>
+                        <?php $credits = $this->resetCredits[$toolLabel] ?? null; ?>
+                        <div class="toolname">
+                            <?= $h($toolLabel) ?>
+                            <?php if ($credits !== null && (int) ($credits['available_count'] ?? 0) > 0): ?>
+                                <?php $creditExpiry = $credits['credits'][0]['expires_at'] ?? null; ?>
+                                <form method="post" onsubmit="return confirm('Redeem one <?= $h($toolLabel) ?> rate-limit reset credit now?')">
+                                    <input type="hidden" name="action" value="reset">
+                                    <input type="hidden" name="tool" value="<?= $h($toolLabel) ?>">
+                                    <button type="submit" style="background:none;border:none;padding:0;font:inherit;color:#4dd2ff;cursor:pointer;text-decoration:underline" title="<?= $creditExpiry !== null ? 'next credit expires ' . $h($this->fmtReset((string) $creditExpiry)) : 'redeem one reset credit' ?>">reset now (<?= (int) $credits['available_count'] ?> left)</button>
+                                </form>
+                            <?php elseif ($credits !== null): ?>
+                                <span style="color:#6b7280">· 0 resets left</span>
+                            <?php endif; ?>
+                        </div>
                         <?php if (empty($limits)): ?>
                             <div class="muted" style="font-size:12px">no data (no auth token or endpoint error)</div>
                         <?php endif; ?>
