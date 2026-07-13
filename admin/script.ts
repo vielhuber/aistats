@@ -241,7 +241,7 @@ class Admin {
             y: { grid: { color: Admin.GRID }, ticks: { color: Admin.TICK, precision: 0 }, beginAtZero: true }
         };
 
-        this.bar('chartHour', data.byHour.labels, data.byHour.data);
+        this.bar('chartDay', data.byDay.labels, data.byDay.data);
         this.doughnut('chartModel', data.byModel.labels, data.byModel.data);
         this.doughnut('chartStatus', data.byStatus.labels, data.byStatus.data, data.byStatus.labels.map(($label: string) => Admin.STATUS_COLORS[$label] || '#94a3b8'));
         this.hbar('chartGroup', data.byGroup.labels, data.byGroup.data);

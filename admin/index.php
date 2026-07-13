@@ -27,7 +27,7 @@ final class Admin
     private int $sumOut = 0;
     private int $errors = 0;
     private array $models = [];
-    private array $byHour = [];
+    private array $byDay = [];
     private array $byStatus = [];
     private array $topGroups = [];
     private array $chartData = [];
@@ -188,6 +188,56 @@ final class Admin
         } elseif (in_array('group', $params, true)) {
             $args['group'] = $grouped;
         }
+        $dailyCacheFile =
+            sys_get_temp_dir() .
+            '/aistats-requests-per-day-' .
+            (function_exists('posix_geteuid') ? posix_geteuid() : getmyuid()) .
+            '-' .
+            md5(
+                json_encode(
+                    [
+                        'from' => $this->dateFrom,
+                        'to' => $this->dateUntil,
+                        'search' => $this->search,
+                        'group' => $this->groupFilter,
+                        'model' => $this->modelFilter,
+                        'source' => $this->sourceFilter
+                    ],
+                    JSON_THROW_ON_ERROR
+                )
+            ) .
+            '.json';
+        $dailyCache =
+            is_file($dailyCacheFile) && time() - (filemtime($dailyCacheFile) ?: 0) < 300
+                ? json_decode((string) file_get_contents($dailyCacheFile), true)
+                : null;
+        if (is_array($dailyCache)) {
+            $this->byDay = $dailyCache;
+        }
+        if (!is_array($dailyCache)) {
+            $dailyArgs = $args;
+            $dailyArgs['limit'] = null;
+            $dailyArgs['date_from'] = $this->dateFrom !== '' ? $this->dateFrom : '1970-01-01 00:00:00';
+            if (in_array('group_by', $params, true)) {
+                $dailyArgs['group_by'] = false;
+            } elseif (in_array('group', $params, true)) {
+                $dailyArgs['group'] = false;
+            }
+            $this->requests = aihelper::getCliApiRequests(...$dailyArgs);
+            $this->applySearch();
+            $this->attachGroups();
+            $this->applyFilters();
+            foreach ($this->requests as $request) {
+                if (($request['time'] ?? null) === null) {
+                    continue;
+                }
+                $day = substr((string) $request['time'], 0, 10);
+                $this->byDay[$day] = ($this->byDay[$day] ?? 0) + (int) ($request['calls'] ?? 1);
+            }
+            ksort($this->byDay);
+            file_put_contents($dailyCacheFile, json_encode($this->byDay, JSON_THROW_ON_ERROR));
+        }
+
         $this->requests = aihelper::getCliApiRequests(...$args);
         $this->applySearch();
         $this->attachGroups();
@@ -294,10 +344,6 @@ final class Admin
             if (($request['model'] ?? null) !== null) {
                 $this->models[$request['model']] = ($this->models[$request['model']] ?? 0) + 1;
             }
-            if (($request['time'] ?? null) !== null) {
-                $hour = substr(str_replace('T', ' ', (string) $request['time']), 0, 13) . ':00';
-                $this->byHour[$hour] = ($this->byHour[$hour] ?? 0) + 1;
-            }
             if ($status === null) {
                 // local cli logs carry no http status but the turn completed → count as success
                 $this->byStatus[($request['source'] ?? 'proxy') === 'proxy' ? 'other' : '2xx']++;
@@ -317,7 +363,6 @@ final class Admin
             $promptGroups[$groupId]['tokens'] += $in + $out;
         }
         arsort($this->models);
-        ksort($this->byHour);
         // rank prompt groups by cost (total tokens in + out), not by number of calls
         uasort($promptGroups, fn($a, $b) => $b['tokens'] <=> $a['tokens']);
         $this->topGroups = array_slice($promptGroups, 0, 12, true);
@@ -327,7 +372,7 @@ final class Admin
     {
         $topModels = array_slice($this->models, 0, 10, true);
         $this->chartData = [
-            'byHour' => ['labels' => array_map(fn($label) => substr($label, 5), array_keys($this->byHour)), 'data' => array_values($this->byHour)],
+            'byDay' => ['labels' => array_keys($this->byDay), 'data' => array_values($this->byDay)],
             'byModel' => ['labels' => array_keys($topModels), 'data' => array_values($topModels)],
             'byStatus' => ['labels' => array_keys($this->byStatus), 'data' => array_values($this->byStatus)],
             'byGroup' => [
@@ -484,6 +529,18 @@ final class Admin
                 if (!isset($windowSeconds[$type]) || $resetTs === false || $used <= 0) {
                     continue;
                 }
+                if ($used >= 100) {
+                    $this->estimate = [
+                        'tool' => $toolLabel,
+                        'type' => $type,
+                        'used' => 100,
+                        'projected' => 100,
+                        'resetTs' => $resetTs,
+                        'exhausted' => true
+                    ];
+                    $this->estimateSeverity = 'crit';
+                    break 2;
+                }
                 $windowTokens = $tokensInWindow[$toolLabel][$type] ?? 0;
                 $ratePerSecond = ($recentTokens[$toolLabel] ?? 0) / 3600.0;
                 if ($windowTokens <= 0 || $ratePerSecond <= 0) {
@@ -527,7 +584,7 @@ final class Admin
         if (!$this->idle && $this->estimate !== null) {
             $this->estimateSeverity = $this->estimate['projected'] >= 100 ? 'crit' : ($this->estimate['projected'] >= 80 ? 'warn' : 'ok');
         }
-        if ($this->estimateSeverity === 'crit') {
+        if ($this->estimateSeverity === 'crit' && !($this->estimate['exhausted'] ?? false)) {
             // how long you would sit blocked between hitting the limit and the window reset
             $gap = max(0, $this->estimate['resetTs'] - $this->estimate['hitTs']);
             $gapParts = [];
@@ -872,7 +929,9 @@ final class Admin
                         <div class="recommend">✅ recommended model currently: <b><?= $h($this->recommended['name']) ?></b> · <?= $fmt(round($this->recommended['free'])) ?>% free</div>
                     <?php endif; ?>
                     <div class="estimate-mini <?= $this->estimateSeverity ?>">
-                        <?php if ($this->idle): ?>
+                        <?php if (($this->estimate['exhausted'] ?? false) === true): ?>
+                            ⛔ <?= $h($this->estimate['tool']) ?> is exhausted.
+                        <?php elseif ($this->idle): ?>
                             idle — nothing on pace
                         <?php elseif ($this->estimate === null): ?>
                             too early to project
@@ -910,7 +969,7 @@ final class Admin
             </div>
 
             <div class="charts">
-                <div class="chart-box"><h2>Requests per hour</h2><div class="canvas-wrap"><canvas id="chartHour"></canvas></div></div>
+                <div class="chart-box"><h2>Requests per day</h2><div class="canvas-wrap"><canvas id="chartDay"></canvas></div></div>
                 <div class="chart-box"><h2>Models used</h2><div class="canvas-wrap"><canvas id="chartModel"></canvas></div></div>
                 <div class="chart-box"><h2>Status</h2><div class="canvas-wrap"><canvas id="chartStatus"></canvas></div></div>
                 <div class="chart-box"><h2>Prompt groups (tokens)</h2><div class="canvas-wrap"><canvas id="chartGroup"></canvas></div></div>
