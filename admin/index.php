@@ -1011,7 +1011,7 @@ final class Admin
                                     <button type="submit" style="background:none;border:none;padding:0;font:inherit;color:#4dd2ff;cursor:pointer;text-decoration:underline" title="<?= $creditExpiry !== null ? 'next credit expires ' . $h($this->fmtReset((string) $creditExpiry)) : 'redeem one reset credit' ?>">reset now (<?= (int) $credits['available_count'] ?> left)</button>
                                 </form>
                             <?php elseif ($credits !== null): ?>
-                                <span style="color:#6b7280">· 0 resets left</span>
+                                <span style="color:#6b7280">0 resets left</span>
                             <?php endif; ?>
                         </div>
                         <?php if (empty($limits)): ?>
