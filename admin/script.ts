@@ -18,6 +18,8 @@ class Admin {
     static TICK = '#8a92a3';
 
     refreshTimer: ReturnType<typeof setTimeout> | null = null;
+    countdownTimer: ReturnType<typeof setInterval> | null = null;
+    charts: Chart[] = [];
     sort = { index: -1, dir: 0 };
     type = 'text';
     page = 1;
@@ -65,7 +67,42 @@ class Admin {
             this.refreshTimer = null;
         }
         if (this.$refresh!.checked) {
-            this.refreshTimer = setTimeout(() => location.reload(), Admin.REFRESH_SECONDS * 1000);
+            this.refreshTimer = setTimeout(() => this.refresh(), Admin.REFRESH_SECONDS * 1000);
+        }
+    }
+
+    async refresh() {
+        this.refreshTimer = null;
+        try {
+            let response = await fetch(window.location.href, { cache: 'no-store' });
+            if (!response.ok) {
+                throw new Error(`Refresh failed with HTTP ${response.status}`);
+            }
+            let nextDocument = new DOMParser().parseFromString(await response.text(), 'text/html');
+            let $nextBody = nextDocument.body;
+            if (!$nextBody) {
+                throw new Error('Refresh returned no body');
+            }
+            $nextBody.querySelectorAll('script[src]').forEach($script => $script.remove());
+            let scrollX = window.scrollX;
+            let scrollY = window.scrollY;
+            let tableScrollLeft = document.querySelector<HTMLElement>('.tablewrap')?.scrollLeft ?? 0;
+            let modelsScrollTop = document.querySelector<HTMLElement>('.models-scroll')?.scrollTop ?? 0;
+            if (this.countdownTimer) {
+                clearInterval(this.countdownTimer);
+                this.countdownTimer = null;
+            }
+            this.charts.forEach(chart => chart.destroy());
+            this.charts = [];
+            document.body.replaceWith(document.importNode($nextBody, true));
+            if (!document.querySelector('.login')) {
+                this.init();
+            }
+            document.querySelector<HTMLElement>('.tablewrap')?.scrollTo({ left: tableScrollLeft });
+            document.querySelector<HTMLElement>('.models-scroll')?.scrollTo({ top: modelsScrollTop });
+            window.scrollTo(scrollX, scrollY);
+        } catch {
+            this.applyAutoRefresh();
         }
     }
 
@@ -82,7 +119,7 @@ class Admin {
             });
         };
         tick();
-        setInterval(tick, 1000);
+        this.countdownTimer = setInterval(tick, 1000);
     }
 
     formatDuration(seconds: number) {
@@ -236,6 +273,7 @@ class Admin {
 
         Chart.defaults.color = Admin.TICK;
         Chart.defaults.font.family = 'Consolas, Menlo, Monaco, "SF Mono", monospace';
+        Chart.defaults.animation = false;
         this.axes = {
             x: { grid: { color: Admin.GRID }, ticks: { color: Admin.TICK, autoSkip: true, maxRotation: 0 } },
             y: { grid: { color: Admin.GRID }, ticks: { color: Admin.TICK, precision: 0 }, beginAtZero: true }
@@ -252,11 +290,11 @@ class Admin {
         if (!$canvas) {
             return;
         }
-        new Chart($canvas, {
+        this.charts.push(new Chart($canvas, {
             type: 'bar',
             data: { labels, datasets: [{ data: values, backgroundColor: color || Admin.PALETTE[0], borderRadius: 4 }] },
             options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: this.axes }
-        });
+        }));
     }
 
     hbar(id: string, labels: string[], values: number[]) {
@@ -264,7 +302,7 @@ class Admin {
         if (!$canvas) {
             return;
         }
-        new Chart($canvas, {
+        this.charts.push(new Chart($canvas, {
             type: 'bar',
             data: { labels, datasets: [{ data: values, backgroundColor: Admin.PALETTE[4], borderRadius: 4 }] },
             options: {
@@ -274,7 +312,7 @@ class Admin {
                 plugins: { legend: { display: false } },
                 scales: { x: this.axes.y, y: { grid: { color: Admin.GRID }, ticks: { color: Admin.TICK } } }
             }
-        });
+        }));
     }
 
     doughnut(id: string, labels: string[], values: number[], colors?: string[]) {
@@ -282,7 +320,7 @@ class Admin {
         if (!$canvas) {
             return;
         }
-        new Chart($canvas, {
+        this.charts.push(new Chart($canvas, {
             type: 'doughnut',
             data: { labels, datasets: [{ data: values, backgroundColor: colors || Admin.PALETTE, borderColor: '#171a21', borderWidth: 2 }] },
             options: {
@@ -290,7 +328,7 @@ class Admin {
                 maintainAspectRatio: false,
                 plugins: { legend: { position: 'right', labels: { boxWidth: 12, padding: 8 } } }
             }
-        });
+        }));
     }
 }
 
