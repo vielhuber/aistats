@@ -565,12 +565,15 @@ final class Admin
         $windowSeconds = ['5-hour' => 5 * 3600, 'weekly' => 7 * 86400];
         $now = time();
 
-        [$tokensInWindow, $recentTokens, $this->recentRequests] = $this->usageTokenPace($windowSeconds);
+        [$tokensInWindow, $recentTokens, $this->recentRequests, $scopedTokensInWindow, $scopedRecentTokens] =
+            $this->usageTokenPace($windowSeconds);
         $this->idle = $this->recentRequests === 0;
 
         foreach ($this->usageTools as $toolLabel => $limits) {
             foreach ($limits ?? [] as $usageLimit) {
                 $type = (string) ($usageLimit['type'] ?? '');
+                $scope = trim((string) ($usageLimit['scope'] ?? ''));
+                $limitLabel = trim($scope . ' ' . $type);
                 $used = (float) ($usageLimit['percent used'] ?? 0);
                 $resetTs = strtotime((string) ($usageLimit['resets_at'] ?? ''));
                 if (!isset($windowSeconds[$type]) || $resetTs === false || $used <= 0) {
@@ -579,7 +582,7 @@ final class Admin
                 if ($used >= 100) {
                     $this->estimate = [
                         'tool' => $toolLabel,
-                        'type' => $type,
+                        'type' => $limitLabel,
                         'used' => 100,
                         'projected' => 100,
                         'resetTs' => $resetTs,
@@ -589,23 +592,43 @@ final class Admin
                     break 2;
                 }
                 $windowTokens = $tokensInWindow[$toolLabel][$type] ?? 0;
-                $ratePerSecond = ($recentTokens[$toolLabel] ?? 0) / 3600.0;
-                if ($windowTokens <= 0 || $ratePerSecond <= 0) {
-                    continue;
+                $recentWindowTokens = $recentTokens[$toolLabel] ?? 0;
+                if ($scope !== '') {
+                    $scopeKey = preg_replace('/[^a-z0-9]+/', '', strtolower($scope)) ?? '';
+                    $windowTokens = 0;
+                    $recentWindowTokens = 0;
+                    foreach ($scopedTokensInWindow[$toolLabel][$type] ?? [] as $modelKey => $tokens) {
+                        if ($scopeKey !== '' && str_contains($modelKey, $scopeKey)) {
+                            $windowTokens += $tokens;
+                        }
+                    }
+                    foreach ($scopedRecentTokens[$toolLabel] ?? [] as $modelKey => $tokens) {
+                        if ($scopeKey !== '' && str_contains($modelKey, $scopeKey)) {
+                            $recentWindowTokens += $tokens;
+                        }
+                    }
                 }
-                // the tokens spent in the window so far correspond to `used` percent → tokens per 1%
-                $tokensPerPercent = $windowTokens / $used;
-                $hitTs = (int) ($now + ($tokensPerPercent * (100 - $used)) / $ratePerSecond);
-                $projected = $used + ($ratePerSecond * max(0, $resetTs - $now)) / $tokensPerPercent;
+                $ratePerSecond = $recentWindowTokens / 3600.0;
+                $projected = $used;
+                $hitTs = $resetTs;
+                $throttle = 0;
+                if ($windowTokens > 0 && $ratePerSecond > 0) {
+                    // The tokens spent in the window so far correspond to `used` percent.
+                    $tokensPerPercent = $windowTokens / $used;
+                    $hitTs = (int) ($now + ($tokensPerPercent * (100 - $used)) / $ratePerSecond);
+                    $projected = $used + ($ratePerSecond * max(0, $resetTs - $now)) / $tokensPerPercent;
+                    $throttle = $projected > 100
+                        ? (int) ceil((1 - (100 - $used) / ($projected - $used)) * 100)
+                        : 0;
+                }
                 $candidate = [
                     'tool' => $toolLabel,
-                    'type' => $type,
+                    'type' => $limitLabel,
                     'used' => $used,
                     'projected' => $projected,
                     'resetTs' => $resetTs,
                     'hitTs' => $hitTs,
-                    // rate reduction needed to reach exactly 100% at reset: allowed/current = (100-used)/(projected-used)
-                    'throttle' => $projected > 100 ? (int) ceil((1 - (100 - $used) / ($projected - $used)) * 100) : 0
+                    'throttle' => $throttle
                 ];
                 // surface the binding constraint: among windows projected to blow past 100%, the one
                 // that hits SOONEST (you get blocked by it first); if none exceed, the highest projected
@@ -673,7 +696,7 @@ final class Admin
     // tokens spent per tool (Claude/Codex) within each usage window + over the last hour (= current
     // pace), and the request count in the last hour (idle gate), from a dedicated log scan over the
     // widest window. cached briefly since this repeats the table's scan on every 30s auto-refresh.
-    // returns [tokensInWindow[tool][window], recentTokens[tool], recentRequestCount].
+    // Returns aggregate and per-model token pace plus the recent request count.
     private function usageTokenPace(array $windowSeconds): array
     {
         $now = time();
@@ -681,10 +704,18 @@ final class Admin
             sys_get_temp_dir() . '/aistats-pace-' . (function_exists('posix_geteuid') ? posix_geteuid() : getmyuid()) . '.json';
         $cached = is_file($cacheFile) ? json_decode((string) file_get_contents($cacheFile), true) : null;
         if (is_array($cached) && $now - (int) ($cached['time'] ?? 0) < 120) {
-            return [$cached['inWindow'] ?? [], $cached['recent'] ?? [], (int) ($cached['recentReq'] ?? 0)];
+            return [
+                $cached['inWindow'] ?? [],
+                $cached['recent'] ?? [],
+                (int) ($cached['recentReq'] ?? 0),
+                $cached['scopedInWindow'] ?? [],
+                $cached['scopedRecent'] ?? []
+            ];
         }
         $inWindow = [];
         $recent = [];
+        $scopedInWindow = [];
+        $scopedRecent = [];
         $recentReq = 0;
         $rows = aihelper::getCliApiRequests(date_from: date('Y-m-d H:i:s', $now - max($windowSeconds)));
         foreach ($rows as $row) {
@@ -711,6 +742,7 @@ final class Admin
             if ($tool === null) {
                 continue;
             }
+            $modelKey = preg_replace('/[^a-z0-9]+/', '', $model) ?? '';
             // input+output only — cache-read tokens are huge but heavily discounted, so counting them
             // would distort the pace; the used%↔token calibration just needs a stable proxy
             $usage = $row['usage'] ?? [];
@@ -720,17 +752,31 @@ final class Admin
             foreach ($windowSeconds as $type => $seconds) {
                 if ($ts >= $now - $seconds) {
                     $inWindow[$tool][$type] = ($inWindow[$tool][$type] ?? 0) + $tokens;
+                    if ($modelKey !== '') {
+                        $scopedInWindow[$tool][$type][$modelKey] =
+                            ($scopedInWindow[$tool][$type][$modelKey] ?? 0) + $tokens;
+                    }
                 }
             }
             if ($ts >= $now - 3600) {
                 $recent[$tool] = ($recent[$tool] ?? 0) + $tokens;
+                if ($modelKey !== '') {
+                    $scopedRecent[$tool][$modelKey] = ($scopedRecent[$tool][$modelKey] ?? 0) + $tokens;
+                }
             }
         }
         @file_put_contents(
             $cacheFile,
-            json_encode(['time' => $now, 'inWindow' => $inWindow, 'recent' => $recent, 'recentReq' => $recentReq])
+            json_encode([
+                'time' => $now,
+                'inWindow' => $inWindow,
+                'recent' => $recent,
+                'recentReq' => $recentReq,
+                'scopedInWindow' => $scopedInWindow,
+                'scopedRecent' => $scopedRecent
+            ])
         );
-        return [$inWindow, $recent, $recentReq];
+        return [$inWindow, $recent, $recentReq, $scopedInWindow, $scopedRecent];
     }
 
     private function tokensIn(?array $usage): ?int
@@ -1012,6 +1058,8 @@ final class Admin
                                 </form>
                             <?php elseif ($credits !== null): ?>
                                 <span style="color:#6b7280">0 resets left</span>
+                            <?php else: ?>
+                                <span style="color:#6b7280">reset function not provided</span>
                             <?php endif; ?>
                         </div>
                         <?php if (empty($limits)): ?>
@@ -1019,9 +1067,10 @@ final class Admin
                         <?php endif; ?>
                         <?php foreach ($limits ?? [] as $usageLimit): ?>
                             <?php $percent = (int) $usageLimit['percent used']; ?>
+                            <?php $scope = trim((string) ($usageLimit['scope'] ?? '')); ?>
                             <div class="usage-row">
                                 <div class="head">
-                                    <b><?= $h($usageLimit['type']) ?> · <?= $percent ?>%</b>
+                                    <b><?= $scope !== '' ? $h($scope) . ' · ' : '' ?><?= $h($usageLimit['type']) ?> · <?= $percent ?>%</b>
                                     <?php $resetTs = strtotime((string) ($usageLimit['resets_at'] ?? '')); ?>
                                     <?php if ($resetTs !== false): ?>
                                         <span class="reset" title="<?= $h($this->fmtReset($usageLimit['resets_at'])) ?>">resets in <span class="countdown" data-reset="<?= $resetTs ?>"></span></span>
