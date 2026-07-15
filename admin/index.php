@@ -7,6 +7,8 @@ use vielhuber\aihelper\aihelper;
 
 final class Admin
 {
+    private const AUTH_COOKIE = 'aistats_auth';
+    private const AUTH_LIFETIME = 180 * 24 * 3600;
     private string $logsDir = '/root/.cli-proxy-api/logs';
     private array $groupPalette = ['#2b3a67', '#234d3a', '#5c4a1e', '#5c2626', '#3b2b52', '#1e4a52', '#5c2b46', '#33384a', '#4a4420', '#2f4d2f', '#472b5c', '#264b4b'];
 
@@ -57,18 +59,6 @@ final class Admin
 
     public function __construct()
     {
-        // persistent login cookie (survives browser restart), not a session cookie; default session
-        // storage — no private session dir
-        $lifetime = 180 * 24 * 3600;
-        ini_set('session.gc_maxlifetime', (string) $lifetime);
-        session_set_cookie_params([
-            'lifetime' => $lifetime,
-            'path' => '/admin',
-            'httponly' => true,
-            'samesite' => 'Lax',
-            'secure' => ($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https' || ($_SERVER['HTTPS'] ?? '') === 'on'
-        ]);
-        session_start();
         $this->loadEnv();
     }
 
@@ -76,7 +66,7 @@ final class Admin
     {
         $this->handleLogout();
         $loginFailed = $this->attemptLogin();
-        if (($_SESSION['auth'] ?? false) !== true) {
+        if ($this->isAuthenticated() !== true) {
             $this->renderLogin($loginFailed);
             return;
         }
@@ -106,8 +96,7 @@ final class Admin
         if (!isset($_GET['logout'])) {
             return;
         }
-        $_SESSION = [];
-        session_destroy();
+        $this->setAuthCookie('', time() - 3600);
         header('Location: ' . strtok((string) $_SERVER['REQUEST_URI'], '?'));
         exit();
     }
@@ -123,12 +112,42 @@ final class Admin
             hash_equals($this->authUser, (string) ($_POST['user'] ?? '')) &&
             hash_equals($this->authPass, (string) ($_POST['pass'] ?? ''))
         ) {
-            session_regenerate_id(true);
-            $_SESSION['auth'] = true;
+            $expires = time() + self::AUTH_LIFETIME;
+            $signature = hash_hmac('sha256', (string) $expires, $this->authKey());
+            $this->setAuthCookie($expires . '.' . $signature, $expires);
             header('Location: ' . strtok((string) $_SERVER['REQUEST_URI'], '?'));
             exit();
         }
         return true;
+    }
+
+    private function isAuthenticated(): bool
+    {
+        $cookie = (string) ($_COOKIE[self::AUTH_COOKIE] ?? '');
+        if ($cookie === '' || $this->authUser === '' || $this->authPass === '') {
+            return false;
+        }
+        [$expires, $signature] = array_pad(explode('.', $cookie, 2), 2, '');
+        if (!ctype_digit($expires) || (int) $expires <= time() || $signature === '') {
+            return false;
+        }
+        return hash_equals(hash_hmac('sha256', $expires, $this->authKey()), $signature);
+    }
+
+    private function authKey(): string
+    {
+        return hash('sha256', $this->authUser . "\0" . $this->authPass, true);
+    }
+
+    private function setAuthCookie(string $value, int $expires): void
+    {
+        setcookie(self::AUTH_COOKIE, $value, [
+            'expires' => $expires,
+            'path' => '/admin',
+            'secure' => ($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https' || ($_SERVER['HTTPS'] ?? '') === 'on',
+            'httponly' => true,
+            'samesite' => 'Lax'
+        ]);
     }
 
     // detail view: stream back the raw log file, guarded against path traversal
