@@ -10,5 +10,6 @@
         "sass": ">=1.80",
         "prettier": ">=3",
         "@prettier/plugin-php": ">=0.25"
-    }
+    },
+    "version": "1.1.1"
 }

@@ -205,15 +205,6 @@ final class Admin
                 api_key: 'x'
             )->triggerCliUsageReset();
         }
-        // drop the cached usage so the refreshed limits and credit count show right away
-        @unlink(
-            sys_get_temp_dir() .
-                '/aistats-usage-' .
-                strtolower($toolLabel) .
-                '-' .
-                (function_exists('posix_geteuid') ? posix_geteuid() : getmyuid()) .
-                '.json'
-        );
         header(
             'Location: ' .
                 strtok((string) $_SERVER['REQUEST_URI'], '?') .
@@ -537,41 +528,9 @@ final class Admin
             if (!$hasAuth) {
                 continue;
             }
-            // the provider usage endpoints rate-limit (429) when polled every refresh — cache the last
-            // good result per tool and only re-hit the endpoint every few minutes, serving the cached
-            // value while fresh and on any failure (so a transient error never shows as "no data").
-            // aihelper caches this internally too as of its next release; this is belt-and-suspenders
-            // that also works with the currently installed version.
-            $cacheFile =
-                sys_get_temp_dir() .
-                '/aistats-usage-' .
-                strtolower($toolLabel) .
-                '-' .
-                (function_exists('posix_geteuid') ? posix_geteuid() : getmyuid()) .
-                '.json';
-            $cached = is_file($cacheFile) ? json_decode((string) file_get_contents($cacheFile), true) : null;
-            $cachedLimits = is_array($cached) && !empty($cached['limits']) ? $cached['limits'] : null;
-            $cachedCredits = is_array($cached) && is_array($cached['reset_credits'] ?? null) ? $cached['reset_credits'] : null;
-            $lastAttempt = is_array($cached) ? (int) ($cached['time'] ?? 0) : 0;
-            // a good result stays fresh 5 min; while we have none yet, still back off 90s between
-            // attempts so a rate-limited (429) endpoint isn't re-hit on every 30s refresh
-            $ttl = $cachedLimits !== null ? 300 : 90;
-            if ($cached !== null && time() - $lastAttempt < $ttl) {
-                $this->usageTools[$toolLabel] = $cachedLimits;
-                $this->resetCredits[$toolLabel] = $cachedCredits;
-                continue;
-            }
             $helper = aihelper::create(provider: $toolConfig[0], model: $toolConfig[1], api_key: 'x');
-            $limits = $helper->getCliUsageLimits() ?: null;
-            // null for providers without redeemable reset credits — those never render a reset link
-            $credits = method_exists($helper, 'getCliUsageResetCredits') ? $helper->getCliUsageResetCredits() : null;
-            // record every attempt time (throttles failures too); keep the last good result on failure
-            @file_put_contents(
-                $cacheFile,
-                json_encode(['time' => time(), 'limits' => $limits ?? $cachedLimits, 'reset_credits' => $credits ?? $cachedCredits])
-            );
-            $this->usageTools[$toolLabel] = $limits ?? $cachedLimits;
-            $this->resetCredits[$toolLabel] = $credits ?? $cachedCredits;
+            $this->usageTools[$toolLabel] = $helper->getCliUsageLimits() ?: null;
+            $this->resetCredits[$toolLabel] = $helper->getCliUsageResetCredits();
         }
     }
 
