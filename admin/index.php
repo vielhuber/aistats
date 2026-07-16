@@ -53,6 +53,7 @@ final class Admin
     private bool $idle = false;
     private string $estimateSeverity = 'ok';
     private ?array $recommended = null;
+    private ?array $promptStats = null;
 
     private string $renderedAt = '';
     private array $baseParams = [];
@@ -543,8 +544,15 @@ final class Admin
         $windowSeconds = ['5-hour' => 5 * 3600, 'weekly' => 7 * 86400];
         $now = time();
 
-        [$tokensInWindow, $recentTokens, $this->recentRequests, $scopedTokensInWindow, $scopedRecentTokens] =
-            $this->usageTokenPace($windowSeconds);
+        [
+            $tokensInWindow,
+            $recentTokens,
+            $this->recentRequests,
+            $scopedTokensInWindow,
+            $scopedRecentTokens,
+            $avgPromptSeconds,
+            $promptTurnCount
+        ] = $this->usageTokenPace($windowSeconds);
         $this->idle = $this->recentRequests === 0;
 
         foreach ($this->usageTools as $toolLabel => $limits) {
@@ -669,25 +677,48 @@ final class Admin
                 $this->recommended = ['name' => $name, 'free' => $free];
             }
         }
+
+        // header stats: how many prompts of average duration still fit until the SOONEST upcoming
+        // window reset (pure time capacity — the pace estimator above covers the quota side)
+        $nextResetTs = null;
+        foreach ($this->usageTools as $limits) {
+            foreach ($limits ?? [] as $usageLimit) {
+                $resetTs = strtotime((string) ($usageLimit['resets_at'] ?? ''));
+                if ($resetTs !== false && $resetTs > $now && ($nextResetTs === null || $resetTs < $nextResetTs)) {
+                    $nextResetTs = $resetTs;
+                }
+            }
+        }
+        if ($avgPromptSeconds !== null && $avgPromptSeconds > 0) {
+            $this->promptStats = [
+                'avgSeconds' => (float) $avgPromptSeconds,
+                'turns' => $promptTurnCount,
+                'left' => $nextResetTs !== null ? (int) floor(($nextResetTs - $now) / $avgPromptSeconds) : null,
+                'resetTs' => $nextResetTs
+            ];
+        }
     }
 
     // tokens spent per tool (Claude/Codex) within each usage window + over the last hour (= current
     // pace), and the request count in the last hour (idle gate), from a dedicated log scan over the
     // widest window. cached briefly since this repeats the table's scan on every 30s auto-refresh.
-    // Returns aggregate and per-model token pace plus the recent request count.
+    // Returns aggregate and per-model token pace, the recent request count and the average prompt
+    // duration (first-to-last api call of a cli turn) with its sample size.
     private function usageTokenPace(array $windowSeconds): array
     {
         $now = time();
         $cacheFile =
             sys_get_temp_dir() . '/aistats-pace-' . (function_exists('posix_geteuid') ? posix_geteuid() : getmyuid()) . '.json';
         $cached = is_file($cacheFile) ? json_decode((string) file_get_contents($cacheFile), true) : null;
-        if (is_array($cached) && $now - (int) ($cached['time'] ?? 0) < 120) {
+        if (is_array($cached) && $now - (int) ($cached['time'] ?? 0) < 120 && array_key_exists('avgPromptSeconds', $cached)) {
             return [
                 $cached['inWindow'] ?? [],
                 $cached['recent'] ?? [],
                 (int) ($cached['recentReq'] ?? 0),
                 $cached['scopedInWindow'] ?? [],
-                $cached['scopedRecent'] ?? []
+                $cached['scopedRecent'] ?? [],
+                $cached['avgPromptSeconds'],
+                (int) ($cached['promptTurns'] ?? 0)
             ];
         }
         $inWindow = [];
@@ -695,6 +726,7 @@ final class Admin
         $scopedInWindow = [];
         $scopedRecent = [];
         $recentReq = 0;
+        $turnRows = [];
         $rows = aihelper::getCliApiRequests(date_from: date('Y-m-d H:i:s', $now - max($windowSeconds)));
         foreach ($rows as $row) {
             $ts = strtotime((string) ($row['time'] ?? ''));
@@ -708,6 +740,14 @@ final class Admin
             // codex → Codex, proxy → by model (this setup routes gpt through the proxy to the codex quota)
             $source = (string) ($row['source'] ?? '');
             $model = strtolower((string) ($row['model'] ?? ''));
+            // collect cli turns for the avg prompt duration: rows of the same session sharing the
+            // same user prompt form one turn (proxy calls are one file per request, so no span there)
+            if ($source === 'claude-code' || $source === 'codex') {
+                $promptKey = explode('|', (string) ($row['group_key'] ?? ''), 3)[2] ?? '';
+                if ($promptKey !== '' && !str_starts_with($promptKey, 'session:')) {
+                    $turnRows[(string) ($row['file'] ?? '')][] = [$ts, $promptKey];
+                }
+            }
             $tool = null;
             if ($source === 'claude-code' || ($source === 'proxy' && str_contains($model, 'claude'))) {
                 $tool = 'Claude';
@@ -743,6 +783,29 @@ final class Admin
                 }
             }
         }
+        // turn duration = span from first to last logged call of the turn; single-call turns carry
+        // no measurable span and would drag the average to zero, so they are skipped
+        $turnDurations = [];
+        foreach ($turnRows as $sessionRows) {
+            usort($sessionRows, fn($a, $b) => $a[0] <=> $b[0]);
+            $turnStart = null;
+            $turnEnd = null;
+            $turnPrompt = null;
+            foreach ($sessionRows as [$rowTs, $promptKey]) {
+                if ($promptKey !== $turnPrompt) {
+                    if ($turnStart !== null && $turnEnd > $turnStart) {
+                        $turnDurations[] = $turnEnd - $turnStart;
+                    }
+                    $turnPrompt = $promptKey;
+                    $turnStart = $rowTs;
+                }
+                $turnEnd = $rowTs;
+            }
+            if ($turnStart !== null && $turnEnd > $turnStart) {
+                $turnDurations[] = $turnEnd - $turnStart;
+            }
+        }
+        $avgPromptSeconds = $turnDurations !== [] ? array_sum($turnDurations) / count($turnDurations) : null;
         @file_put_contents(
             $cacheFile,
             json_encode([
@@ -751,10 +814,12 @@ final class Admin
                 'recent' => $recent,
                 'recentReq' => $recentReq,
                 'scopedInWindow' => $scopedInWindow,
-                'scopedRecent' => $scopedRecent
+                'scopedRecent' => $scopedRecent,
+                'avgPromptSeconds' => $avgPromptSeconds,
+                'promptTurns' => count($turnDurations)
             ])
         );
-        return [$inWindow, $recent, $recentReq, $scopedInWindow, $scopedRecent];
+        return [$inWindow, $recent, $recentReq, $scopedInWindow, $scopedRecent, $avgPromptSeconds, count($turnDurations)];
     }
 
     private function tokensIn(?array $usage): ?int
@@ -1022,6 +1087,21 @@ final class Admin
                             ✅ on pace
                         <?php endif; ?>
                     </div>
+                    <?php if ($this->promptStats !== null): ?>
+                        <?php
+                        $avgSeconds = (int) round($this->promptStats['avgSeconds']);
+                        $avgLabel =
+                            $avgSeconds >= 3600
+                                ? intdiv($avgSeconds, 3600) . 'h ' . intdiv($avgSeconds % 3600, 60) . 'm'
+                                : ($avgSeconds >= 60 ? intdiv($avgSeconds, 60) . 'm ' . ($avgSeconds % 60) . 's' : $avgSeconds . 's');
+                        ?>
+                        <div class="estimate-mini warn">
+                            <?php if ($this->promptStats['left'] !== null): ?>
+                                <div>≈<b><?= $fmt($this->promptStats['left']) ?> prompts left</b> until next reset (in <span class="countdown" data-reset="<?= (int) $this->promptStats['resetTs'] ?>"></span>)</div>
+                            <?php endif; ?>
+                            <div>⌀ <b><?= $h($avgLabel) ?> per prompt</b> · avg over <?= $fmt($this->promptStats['turns']) ?> cli prompts (last 7 days)</div>
+                        </div>
+                    <?php endif; ?>
                     <?php if (empty($this->usageTools)): ?>
                         <div class="muted">No usage data available.</div>
                     <?php endif; ?>
