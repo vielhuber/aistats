@@ -701,7 +701,7 @@ final class Admin
 
     // tokens spent per tool (Claude/Codex) within each usage window + over the last hour (= current
     // pace), and the request count in the last hour (idle gate), from a dedicated log scan over the
-    // widest window. cached briefly since this repeats the table's scan on every 30s auto-refresh.
+    // widest window. cached briefly since this repeats the table's scan on every 2m auto-refresh.
     // Returns aggregate and per-model token pace, the recent request count and the average prompt
     // duration (first-to-last api call of a cli turn) with its sample size.
     private function usageTokenPace(array $windowSeconds): array

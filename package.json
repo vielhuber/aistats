@@ -7,9 +7,9 @@
     },
     "devDependencies": {
         "esbuild": ">=0.28",
-        "sass": ">=1.80",
+        "sass": ">=1.101",
         "prettier": ">=3",
         "@prettier/plugin-php": ">=0.25"
     },
-    "version": "1.1.2"
+    "version": "1.1.3"
 }
