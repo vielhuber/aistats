@@ -3,7 +3,7 @@ import { Chart, registerables } from 'chart.js';
 Chart.register(...registerables);
 
 class Admin {
-    static REFRESH_SECONDS = 120;
+    static REFRESH_SECONDS = 180;
     static PAGE_SIZE = 25;
 
     static SELECTOR_ROW = 'tbody tr[data-raw]';

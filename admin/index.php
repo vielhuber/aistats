@@ -701,7 +701,7 @@ final class Admin
 
     // tokens spent per tool (Claude/Codex) within each usage window + over the last hour (= current
     // pace), and the request count in the last hour (idle gate), from a dedicated log scan over the
-    // widest window. cached briefly since this repeats the table's scan on every 2m auto-refresh.
+    // widest window. cached briefly since this repeats the table's scan on every 3m auto-refresh.
     // Returns aggregate and per-model token pace, the recent request count and the average prompt
     // duration (first-to-last api call of a cli turn) with its sample size.
     private function usageTokenPace(array $windowSeconds): array
@@ -1040,7 +1040,7 @@ final class Admin
         <header>
             <div class="brand"><?php foreach (str_split('aistats') as $brandIndex => $brandChar): ?><span style="animation-delay: <?= $brandIndex * 0.14 ?>s"><?= $h($brandChar) ?></span><?php endforeach; ?></div>
             <div class="clock" title="last refresh"><?= $h($this->renderedAt) ?></div>
-            <label class="toggle"><input type="checkbox" id="autorefresh"> auto-refresh</label>
+            <label class="toggle"><input type="checkbox" id="autorefresh"> auto refresh (3m)</label>
             <a class="logout" href="?logout">logout</a>
         </header>
         <div class="wrap">
@@ -1264,7 +1264,7 @@ final class Admin
             <div class="pagination" id="pagination"></div>
         </div>
         <script id="chartdata" type="application/json"><?= json_encode($this->chartData, JSON_HEX_TAG | JSON_UNESCAPED_UNICODE) ?></script>
-        <script src="bundle.js"></script>
+        <script src="bundle.js?v=<?= filemtime(__DIR__ . '/bundle.js') ?>"></script>
         </body>
         </html>
         <?php
