@@ -7,6 +7,7 @@ class Admin {
     static PAGE_SIZE = 25;
 
     static SELECTOR_ROW = 'tbody tr[data-raw]';
+    static SELECTOR_AUTOCREDIT = '#autocredit';
     static SELECTOR_AUTOREFRESH = '#autorefresh';
     static SELECTOR_CHARTDATA = '#chartdata';
     static SELECTOR_TABLE = '.tablewrap table';
@@ -23,6 +24,7 @@ class Admin {
     sort = { index: -1, dir: 0 };
     type = 'text';
     page = 1;
+    $autoCredit!: HTMLInputElement | null;
     $refresh!: HTMLInputElement | null;
     $tbody!: HTMLElement;
     $pagination!: HTMLElement | null;
@@ -31,10 +33,27 @@ class Admin {
 
     init() {
         this.bindRowClicks();
+        this.bindAutoCredit();
         this.bindAutoRefresh();
         this.bindCountdowns();
         this.bindTable();
         this.renderCharts();
+    }
+
+    bindAutoCredit() {
+        this.$autoCredit = document.querySelector(Admin.SELECTOR_AUTOCREDIT);
+        if (!this.$autoCredit) {
+            return;
+        }
+        this.$autoCredit.addEventListener('change', () => {
+            let secure = window.location.protocol === 'https:' ? '; Secure' : '';
+            let cookie = this.$autoCredit!.dataset.cookie;
+            let lifetime = this.$autoCredit!.dataset.lifetime;
+            document.cookie = `${cookie}=${this.$autoCredit!.checked ? '1' : '0'}; Max-Age=${lifetime}; Path=/admin; SameSite=Lax${secure}`;
+            if (this.$autoCredit!.checked) {
+                window.location.reload();
+            }
+        });
     }
 
     // open the raw log when a row is clicked (ignore clicks on links, e.g. the filters)

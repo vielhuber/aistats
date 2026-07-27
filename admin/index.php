@@ -9,6 +9,8 @@ final class Admin
 {
     private const AUTH_COOKIE = 'aistats_auth';
     private const AUTH_LIFETIME = 180 * 24 * 3600;
+    private const AUTO_CREDIT_COOKIE = 'aistats_auto_credit';
+    private const AUTO_CREDIT_LIFETIME = 180 * 24 * 3600;
     private string $logsDir = '/root/.cli-proxy-api/logs';
     private array $groupPalette = ['#2b3a67', '#234d3a', '#5c4a1e', '#5c2626', '#3b2b52', '#1e4a52', '#5c2b46', '#33384a', '#4a4420', '#2f4d2f', '#472b5c', '#264b4b'];
 
@@ -21,6 +23,7 @@ final class Admin
 
     private string $authUser = '';
     private string $authPass = '';
+    private bool $autoCreditEnabled = false;
 
     private int $limit = 200;
     private string $dateFrom = '';
@@ -61,6 +64,7 @@ final class Admin
     public function __construct()
     {
         $this->loadEnv();
+        $this->autoCreditEnabled = ($_COOKIE[self::AUTO_CREDIT_COOKIE] ?? '') === '1';
     }
 
     public function run(): void
@@ -532,6 +536,84 @@ final class Admin
             $helper = aihelper::create(provider: $toolConfig[0], model: $toolConfig[1], api_key: 'x');
             $this->usageTools[$toolLabel] = $helper->getCliUsageLimits() ?: null;
             $this->resetCredits[$toolLabel] = $helper->getCliUsageResetCredits();
+        }
+
+        if ($this->autoCreditEnabled !== true) {
+            return;
+        }
+        $codexLimits = $this->usageTools['Codex'] ?? null;
+        $codexCredits = $this->resetCredits['Codex'] ?? null;
+        if (!is_array($codexLimits)) {
+            return;
+        }
+        $exhaustedWindows = [];
+        foreach ($codexLimits as $codexLimit) {
+            if ((float) ($codexLimit['percent used'] ?? 0) < 100) {
+                continue;
+            }
+            $exhaustedWindows[] = implode('|', [
+                (string) ($codexLimit['type'] ?? ''),
+                (string) ($codexLimit['scope'] ?? ''),
+                (string) ($codexLimit['resets_at'] ?? '')
+            ]);
+        }
+        sort($exhaustedWindows);
+        $stateFile =
+            sys_get_temp_dir() .
+            '/aistats-auto-credit-' .
+            (function_exists('posix_geteuid') ? posix_geteuid() : getmyuid()) .
+            '.json';
+        $lock = fopen($stateFile . '.lock', 'c+');
+        if ($lock === false || flock($lock, LOCK_EX) !== true) {
+            if (is_resource($lock)) {
+                fclose($lock);
+            }
+            return;
+        }
+        $redeemed = false;
+        try {
+            if ($exhaustedWindows === []) {
+                file_put_contents(
+                    $stateFile,
+                    json_encode(['armed' => true, 'fingerprint' => null], JSON_THROW_ON_ERROR)
+                );
+                return;
+            }
+            if (!is_array($codexCredits) || (int) ($codexCredits['available_count'] ?? 0) < 1) {
+                return;
+            }
+            $fingerprint = hash('sha256', json_encode($exhaustedWindows, JSON_THROW_ON_ERROR));
+            $state = is_file($stateFile) ? json_decode((string) file_get_contents($stateFile), true) : null;
+            if (
+                is_array($state) &&
+                (($state['armed'] ?? true) !== true || ($state['fingerprint'] ?? null) === $fingerprint)
+            ) {
+                return;
+            }
+            $toolConfig = self::USAGE_TOOL_CONFIG['Codex'];
+            $result = aihelper::create(
+                provider: $toolConfig[0],
+                model: $toolConfig[1],
+                api_key: 'x'
+            )->triggerCliUsageReset();
+            if (($result['success'] ?? false) !== true) {
+                return;
+            }
+            file_put_contents(
+                $stateFile,
+                json_encode(
+                    ['armed' => false, 'fingerprint' => $fingerprint, 'redeemed_at' => time()],
+                    JSON_THROW_ON_ERROR
+                )
+            );
+            $redeemed = true;
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
+        if ($redeemed === true) {
+            header('Location: ' . strtok((string) $_SERVER['REQUEST_URI'], '?') . '?resetresult=reset');
+            exit();
         }
     }
 
@@ -1040,6 +1122,7 @@ final class Admin
         <header>
             <div class="brand"><?php foreach (str_split('aistats') as $brandIndex => $brandChar): ?><span style="animation-delay: <?= $brandIndex * 0.14 ?>s"><?= $h($brandChar) ?></span><?php endforeach; ?></div>
             <div class="clock" title="last refresh"><?= $h($this->renderedAt) ?></div>
+            <label class="toggle"><input type="checkbox" id="autocredit" data-cookie="<?= self::AUTO_CREDIT_COOKIE ?>" data-lifetime="<?= self::AUTO_CREDIT_LIFETIME ?>"<?= $this->autoCreditEnabled ? ' checked' : '' ?>> auto credit</label>
             <label class="toggle"><input type="checkbox" id="autorefresh"> auto refresh (3m)</label>
             <a class="logout" href="?logout">logout</a>
         </header>
