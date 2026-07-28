@@ -116,6 +116,11 @@ a:hover { text-decoration: underline; }
 .usage-row .head { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; margin-bottom: 5px; gap: 10px; }
 .usage-row .head b { font-weight: 600; }
 .usage-row .reset { color: #6b7280; font-size: 11px; white-space: nowrap; }
+.usage-row--scoped { display: none; }
+.usage-row--scoped .head b { color: #8a92a3; font-weight: 500; }
+.scoped-visible .usage-row--scoped { display: block; }
+.scoped-toggle { width: auto; display: block; background: none; border: 0; border-radius: 0; color: #4b5563; font-size: 10px; padding: 0; margin-top: 14px; cursor: pointer; }
+.scoped-toggle:hover { color: #8a92a3; }
 .countdown { font-variant-numeric: tabular-nums; color: #8a92a3; }
 .estimate-mini .countdown { color: inherit; }
 .bar { height: 8px; background: #0f1115; border: 1px solid #262a33; border-radius: 999px; overflow: hidden; }

@@ -548,7 +548,7 @@ final class Admin
         }
         $exhaustedWindows = [];
         foreach ($codexLimits as $codexLimit) {
-            if ((float) ($codexLimit['percent used'] ?? 0) < 100) {
+            if (self::isModelSpecific($codexLimit) || (float) ($codexLimit['percent used'] ?? 0) < 100) {
                 continue;
             }
             $exhaustedWindows[] = implode('|', [
@@ -626,22 +626,18 @@ final class Admin
         $windowSeconds = ['5-hour' => 5 * 3600, 'weekly' => 7 * 86400];
         $now = time();
 
-        [
-            $tokensInWindow,
-            $recentTokens,
-            $this->recentRequests,
-            $scopedTokensInWindow,
-            $scopedRecentTokens,
-            $avgPromptSeconds,
-            $promptTurnCount
-        ] = $this->usageTokenPace($windowSeconds);
+        [$tokensInWindow, $recentTokens, $this->recentRequests, $avgPromptSeconds, $promptTurnCount] = $this->usageTokenPace(
+            $windowSeconds
+        );
         $this->idle = $this->recentRequests === 0;
 
         foreach ($this->usageTools as $toolLabel => $limits) {
             foreach ($limits ?? [] as $usageLimit) {
                 $type = (string) ($usageLimit['type'] ?? '');
-                $scope = trim((string) ($usageLimit['scope'] ?? ''));
-                $limitLabel = trim($scope . ' ' . $type);
+                if (self::isModelSpecific($usageLimit)) {
+                    continue;
+                }
+                $limitLabel = $type;
                 $used = (float) ($usageLimit['percent used'] ?? 0);
                 $resetTs = strtotime((string) ($usageLimit['resets_at'] ?? ''));
                 if (!isset($windowSeconds[$type]) || $resetTs === false || $used <= 0) {
@@ -661,21 +657,6 @@ final class Admin
                 }
                 $windowTokens = $tokensInWindow[$toolLabel][$type] ?? 0;
                 $recentWindowTokens = $recentTokens[$toolLabel] ?? 0;
-                if ($scope !== '') {
-                    $scopeKey = preg_replace('/[^a-z0-9]+/', '', strtolower($scope)) ?? '';
-                    $windowTokens = 0;
-                    $recentWindowTokens = 0;
-                    foreach ($scopedTokensInWindow[$toolLabel][$type] ?? [] as $modelKey => $tokens) {
-                        if ($scopeKey !== '' && str_contains($modelKey, $scopeKey)) {
-                            $windowTokens += $tokens;
-                        }
-                    }
-                    foreach ($scopedRecentTokens[$toolLabel] ?? [] as $modelKey => $tokens) {
-                        if ($scopeKey !== '' && str_contains($modelKey, $scopeKey)) {
-                            $recentWindowTokens += $tokens;
-                        }
-                    }
-                }
                 $ratePerSecond = $recentWindowTokens / 3600.0;
                 $projected = $used;
                 $hitTs = $resetTs;
@@ -752,6 +733,9 @@ final class Admin
             }
             $maxUsed = 0.0;
             foreach ($limits as $usageLimit) {
+                if (self::isModelSpecific($usageLimit)) {
+                    continue;
+                }
                 $maxUsed = max($maxUsed, (float) ($usageLimit['percent used'] ?? 0));
             }
             $free = 100 - $maxUsed;
@@ -765,6 +749,9 @@ final class Admin
         $nextResetTs = null;
         foreach ($this->usageTools as $limits) {
             foreach ($limits ?? [] as $usageLimit) {
+                if (self::isModelSpecific($usageLimit)) {
+                    continue;
+                }
                 $resetTs = strtotime((string) ($usageLimit['resets_at'] ?? ''));
                 if ($resetTs !== false && $resetTs > $now && ($nextResetTs === null || $resetTs < $nextResetTs)) {
                     $nextResetTs = $resetTs;
@@ -797,16 +784,12 @@ final class Admin
                 $cached['inWindow'] ?? [],
                 $cached['recent'] ?? [],
                 (int) ($cached['recentReq'] ?? 0),
-                $cached['scopedInWindow'] ?? [],
-                $cached['scopedRecent'] ?? [],
                 $cached['avgPromptSeconds'],
                 (int) ($cached['promptTurns'] ?? 0)
             ];
         }
         $inWindow = [];
         $recent = [];
-        $scopedInWindow = [];
-        $scopedRecent = [];
         $recentReq = 0;
         $turnRows = [];
         $rows = aihelper::getCliApiRequests(date_from: date('Y-m-d H:i:s', $now - max($windowSeconds)));
@@ -842,7 +825,6 @@ final class Admin
             if ($tool === null) {
                 continue;
             }
-            $modelKey = preg_replace('/[^a-z0-9]+/', '', $model) ?? '';
             // input+output only — cache-read tokens are huge but heavily discounted, so counting them
             // would distort the pace; the used%↔token calibration just needs a stable proxy
             $usage = $row['usage'] ?? [];
@@ -852,17 +834,10 @@ final class Admin
             foreach ($windowSeconds as $type => $seconds) {
                 if ($ts >= $now - $seconds) {
                     $inWindow[$tool][$type] = ($inWindow[$tool][$type] ?? 0) + $tokens;
-                    if ($modelKey !== '') {
-                        $scopedInWindow[$tool][$type][$modelKey] =
-                            ($scopedInWindow[$tool][$type][$modelKey] ?? 0) + $tokens;
-                    }
                 }
             }
             if ($ts >= $now - 3600) {
                 $recent[$tool] = ($recent[$tool] ?? 0) + $tokens;
-                if ($modelKey !== '') {
-                    $scopedRecent[$tool][$modelKey] = ($scopedRecent[$tool][$modelKey] ?? 0) + $tokens;
-                }
             }
         }
         // turn duration = span from first to last logged call of the turn; single-call turns carry
@@ -895,13 +870,11 @@ final class Admin
                 'inWindow' => $inWindow,
                 'recent' => $recent,
                 'recentReq' => $recentReq,
-                'scopedInWindow' => $scopedInWindow,
-                'scopedRecent' => $scopedRecent,
                 'avgPromptSeconds' => $avgPromptSeconds,
                 'promptTurns' => count($turnDurations)
             ])
         );
-        return [$inWindow, $recent, $recentReq, $scopedInWindow, $scopedRecent, $avgPromptSeconds, count($turnDurations)];
+        return [$inWindow, $recent, $recentReq, $avgPromptSeconds, count($turnDurations)];
     }
 
     private function tokensIn(?array $usage): ?int
@@ -1008,6 +981,11 @@ final class Admin
         return 'green';
     }
 
+    private static function isModelSpecific(array $usageLimit): bool
+    {
+        return trim((string) ($usageLimit['scope'] ?? '')) !== '';
+    }
+
     private function usageColor(int $percent): string
     {
         return $percent >= 90 ? '#f87171' : ($percent >= 70 ? '#fbbf24' : '#4ade80');
@@ -1082,7 +1060,7 @@ final class Admin
             <title>aistats</title>
             <style>html,body{background:#0f1115;color:#e6e6e6}</style>
             <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%230f1115'/><rect x='3' y='8' width='2.5' height='5' fill='%234dd2ff'/><rect x='6.75' y='5' width='2.5' height='8' fill='%234ade80'/><rect x='10.5' y='3' width='2.5' height='10' fill='%23fbbf24'/></svg>">
-            <link rel="stylesheet" href="bundle.css">
+            <link rel="stylesheet" href="bundle.css?v=<?= filemtime(__DIR__ . '/bundle.css') ?>">
         </head>
         <body>
         <div class="login">
@@ -1116,7 +1094,7 @@ final class Admin
             <title>aistats</title>
             <style>html,body{background:#0f1115;color:#e6e6e6}</style>
             <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%230f1115'/><rect x='3' y='8' width='2.5' height='5' fill='%234dd2ff'/><rect x='6.75' y='5' width='2.5' height='8' fill='%234ade80'/><rect x='10.5' y='3' width='2.5' height='10' fill='%23fbbf24'/></svg>">
-            <link rel="stylesheet" href="bundle.css">
+            <link rel="stylesheet" href="bundle.css?v=<?= filemtime(__DIR__ . '/bundle.css') ?>">
         </head>
         <body>
         <header>
@@ -1180,14 +1158,22 @@ final class Admin
                         ?>
                         <div class="estimate-mini warn">
                             <?php if ($this->promptStats['left'] !== null): ?>
-                                <div>≈<b><?= $fmt($this->promptStats['left']) ?> prompts left</b> until next reset (in <span class="countdown" data-reset="<?= (int) $this->promptStats['resetTs'] ?>"></span>)</div>
+                                ≈<b><?= $fmt($this->promptStats['left']) ?> prompts left</b> until next reset (in <span class="countdown" data-reset="<?= (int) $this->promptStats['resetTs'] ?>"></span>) ·
                             <?php endif; ?>
-                            <div>⌀ <b><?= $h($avgLabel) ?> per prompt</b> · avg over <?= $fmt($this->promptStats['turns']) ?> cli prompts (last 7 days)</div>
+                            ⌀ <b><?= $h($avgLabel) ?> per prompt</b> · avg over <?= $fmt($this->promptStats['turns']) ?> cli prompts (last 7 days)
                         </div>
                     <?php endif; ?>
                     <?php if (empty($this->usageTools)): ?>
                         <div class="muted">No usage data available.</div>
                     <?php endif; ?>
+                    <?php
+                    $scopedCount = 0;
+                    foreach ($this->usageTools as $limits) {
+                        foreach ($limits ?? [] as $usageLimit) {
+                            $scopedCount += self::isModelSpecific($usageLimit) ? 1 : 0;
+                        }
+                    }
+                    ?>
                     <?php foreach ($this->usageTools as $toolLabel => $limits): ?>
                         <?php $credits = $this->resetCredits[$toolLabel] ?? null; ?>
                         <div class="toolname">
@@ -1211,7 +1197,7 @@ final class Admin
                         <?php foreach ($limits ?? [] as $usageLimit): ?>
                             <?php $percent = (int) $usageLimit['percent used']; ?>
                             <?php $scope = trim((string) ($usageLimit['scope'] ?? '')); ?>
-                            <div class="usage-row">
+                            <div class="usage-row<?= $scope !== '' ? ' usage-row--scoped' : '' ?>">
                                 <div class="head">
                                     <b><?= $scope !== '' ? $h($scope) . ' · ' : '' ?><?= $h($usageLimit['type']) ?> · <?= $percent ?>%</b>
                                     <?php $resetTs = strtotime((string) ($usageLimit['resets_at'] ?? '')); ?>
@@ -1223,6 +1209,9 @@ final class Admin
                             </div>
                         <?php endforeach; ?>
                     <?php endforeach; ?>
+                    <?php if ($scopedCount > 0): ?>
+                        <button type="button" id="scopedtoggle" class="scoped-toggle" data-count="<?= $scopedCount ?>" title="model-specific windows are excluded from pace, warnings and the reset countdown">show <?= $scopedCount ?> model-specific limits</button>
+                    <?php endif; ?>
                 </div>
             </div>
 

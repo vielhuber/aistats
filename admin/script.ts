@@ -12,6 +12,7 @@ class Admin {
     static SELECTOR_CHARTDATA = '#chartdata';
     static SELECTOR_TABLE = '.tablewrap table';
     static SELECTOR_COUNTDOWN = '.countdown[data-reset]';
+    static SELECTOR_SCOPEDTOGGLE = '#scopedtoggle';
 
     static PALETTE = ['#3b6ef5', '#4ade80', '#fbbf24', '#f87171', '#a78bfa', '#22d3ee', '#f472b6', '#94a3b8', '#facc15', '#34d399'];
     static STATUS_COLORS: Record<string, string> = { '2xx': '#4ade80', '4xx': '#fbbf24', '5xx': '#f87171', other: '#94a3b8' };
@@ -25,6 +26,8 @@ class Admin {
     type = 'text';
     page = 1;
     $autoCredit!: HTMLInputElement | null;
+    $scopedToggle!: HTMLButtonElement | null;
+    scopedVisible = false;
     $refresh!: HTMLInputElement | null;
     $tbody!: HTMLElement;
     $pagination!: HTMLElement | null;
@@ -36,8 +39,31 @@ class Admin {
         this.bindAutoCredit();
         this.bindAutoRefresh();
         this.bindCountdowns();
+        this.bindScopedLimits();
         this.bindTable();
         this.renderCharts();
+    }
+
+    // model-specific windows (fable, codex-spark) are hidden by default: they do
+    // not constrain the account and are excluded from pace, warnings and resets.
+    // the choice is deliberately not persisted — every load starts collapsed
+    bindScopedLimits() {
+        this.$scopedToggle = document.querySelector(Admin.SELECTOR_SCOPEDTOGGLE);
+        if (!this.$scopedToggle) {
+            return;
+        }
+        this.$scopedToggle.addEventListener('click', () => {
+            this.scopedVisible = !this.scopedVisible;
+            this.renderScopedLimits();
+        });
+    }
+
+    // the label is rendered server-side for the default (hidden) state, so the
+    // button stays meaningful even before this script runs
+    renderScopedLimits() {
+        let count = this.$scopedToggle!.dataset.count ?? '0';
+        document.body.classList.toggle('scoped-visible', this.scopedVisible);
+        this.$scopedToggle!.textContent = `${this.scopedVisible ? 'hide' : 'show'} ${count} model-specific limits`;
     }
 
     bindAutoCredit() {
