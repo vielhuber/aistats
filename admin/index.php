@@ -18,6 +18,7 @@ final class Admin
     private const USAGE_TOOL_CONFIG = [
         'Claude' => ['anthropic', 'claude-sonnet-4-5-20250929', ['/root/.claude/.credentials.json', '/root/.cli-proxy-api/claude*.json']],
         'Codex' => ['openai', 'gpt-5-codex', ['/root/.codex/auth.json', '/root/.cli-proxy-api/codex*.json']],
+        'OpenCode' => ['opencode', 'opencode-go/glm-5.2', ['/root/.local/share/opencode/opencode.db']],
         'Antigravity' => ['google', 'antigravity-gemini', ['/root/.gemini/antigravity-cli/antigravity-oauth-token', '/root/.cli-proxy-api/antigravity*.json']]
     ];
 
@@ -768,7 +769,7 @@ final class Admin
         }
     }
 
-    // tokens spent per tool (Claude/Codex) within each usage window + over the last hour (= current
+    // tokens spent per tool (Claude/Codex/OpenCode) within each usage window + over the last hour (= current
     // pace), and the request count in the last hour (idle gate), from a dedicated log scan over the
     // widest window. cached briefly since this repeats the table's scan on every 3m auto-refresh.
     // Returns aggregate and per-model token pace, the recent request count and the average prompt
@@ -792,6 +793,7 @@ final class Admin
         $recent = [];
         $recentReq = 0;
         $turnRows = [];
+        $directTurnDurations = [];
         $rows = aihelper::getCliApiRequests(date_from: date('Y-m-d H:i:s', $now - max($windowSeconds)));
         foreach ($rows as $row) {
             $ts = strtotime((string) ($row['time'] ?? ''));
@@ -802,7 +804,7 @@ final class Admin
                 $recentReq++;
             }
             // attribute the request to the tool whose usage limit it consumes: claude-code → Claude,
-            // codex → Codex, proxy → by model (this setup routes gpt through the proxy to the codex quota)
+            // codex → Codex, opencode → OpenCode, proxy → by model
             $source = (string) ($row['source'] ?? '');
             $model = strtolower((string) ($row['model'] ?? ''));
             // collect cli turns for the avg prompt duration: rows of the same session sharing the
@@ -813,6 +815,9 @@ final class Admin
                     $turnRows[(string) ($row['file'] ?? '')][] = [$ts, $promptKey];
                 }
             }
+            if ($source === 'opencode' && (int) ($row['duration_in_ms'] ?? 0) > 0) {
+                $directTurnDurations[] = (int) round((int) $row['duration_in_ms'] / 1000);
+            }
             $tool = null;
             if ($source === 'claude-code' || ($source === 'proxy' && str_contains($model, 'claude'))) {
                 $tool = 'Claude';
@@ -821,6 +826,8 @@ final class Admin
                 ($source === 'proxy' && (str_contains($model, 'gpt') || str_contains($model, 'codex')))
             ) {
                 $tool = 'Codex';
+            } elseif ($source === 'opencode') {
+                $tool = 'OpenCode';
             }
             if ($tool === null) {
                 continue;
@@ -842,7 +849,7 @@ final class Admin
         }
         // turn duration = span from first to last logged call of the turn; single-call turns carry
         // no measurable span and would drag the average to zero, so they are skipped
-        $turnDurations = [];
+        $turnDurations = $directTurnDurations;
         foreach ($turnRows as $sessionRows) {
             usort($sessionRows, fn($a, $b) => $a[0] <=> $b[0]);
             $turnStart = null;
@@ -1203,6 +1210,8 @@ final class Admin
                                     <?php $resetTs = strtotime((string) ($usageLimit['resets_at'] ?? '')); ?>
                                     <?php if ($resetTs !== false): ?>
                                         <span class="reset" title="<?= $h($this->fmtReset($usageLimit['resets_at'])) ?>">resets in <span class="countdown" data-reset="<?= $resetTs ?>"></span></span>
+                                    <?php elseif (($usageLimit['estimated'] ?? false) === true): ?>
+                                        <span class="reset" title="Calculated only from the local OpenCode database; other devices and server-side adjustments are not included.">$<?= $h(number_format((float) ($usageLimit['used_usd'] ?? 0), 2)) ?> / $<?= $h(number_format((float) ($usageLimit['limit_usd'] ?? 0), 0)) ?> · local estimate</span>
                                     <?php endif; ?>
                                 </div>
                                 <div class="bar"><span style="width: <?= max(2, $percent) ?>%; background: <?= $this->usageColor($percent) ?>;"></span></div>
@@ -1279,7 +1288,7 @@ final class Admin
                 <div><label>From</label><input type="text" name="from" value="<?= $h($this->dateFrom) ?>" placeholder="2026-07-01 00:00:00" style="width:180px"></div>
                 <div><label>To</label><input type="text" name="to" value="<?= $h($this->dateUntil) ?>" placeholder="2026-07-31 23:59:59" style="width:180px"></div>
                 <div><label>Limit</label><input type="number" name="limit" value="<?= $h($this->limit) ?>" style="width:90px"></div>
-                <div><label>Source</label><select name="source"><option value="" <?= $this->sourceFilter === '' ? 'selected' : '' ?>>all sources</option><option value="proxy" <?= $this->sourceFilter === 'proxy' ? 'selected' : '' ?>>cliproxyapi</option><option value="claude-code" <?= $this->sourceFilter === 'claude-code' ? 'selected' : '' ?>>claude-code</option><option value="codex" <?= $this->sourceFilter === 'codex' ? 'selected' : '' ?>>codex</option></select></div>
+                <div><label>Source</label><select name="source"><option value="" <?= $this->sourceFilter === '' ? 'selected' : '' ?>>all sources</option><option value="proxy" <?= $this->sourceFilter === 'proxy' ? 'selected' : '' ?>>cliproxyapi</option><option value="claude-code" <?= $this->sourceFilter === 'claude-code' ? 'selected' : '' ?>>claude-code</option><option value="codex" <?= $this->sourceFilter === 'codex' ? 'selected' : '' ?>>codex</option><option value="opencode" <?= $this->sourceFilter === 'opencode' ? 'selected' : '' ?>>opencode</option></select></div>
                 <div><label>View</label><select name="groupby"><option value="project" <?= $this->groupby === 'project' ? 'selected' : '' ?>>grouped by project</option><option value="off" <?= $this->groupby === 'off' ? 'selected' : '' ?>>all calls</option></select></div>
                 <button type="submit">Filter</button>
             </form>
