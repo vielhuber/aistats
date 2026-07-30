@@ -895,10 +895,35 @@ final class Admin
     }
 
     // collect the readable text of a request (system prompt preferred, else user messages)
-    private function collectText(?array $body, bool $systemOnly): string
+    // aihelper hands the request body through unparsed when it is not valid json,
+    // so this arrives as a string just as often as it arrives decoded
+    private function normalizeBody(mixed $body): ?array
     {
+        if (is_array($body)) {
+            return $body;
+        }
+        if (!is_string($body) || trim($body) === '') {
+            return null;
+        }
+        $decoded = json_decode($body, true);
+        if (is_array($decoded)) {
+            return $decoded;
+        }
+        // a multipart upload carries no readable prompt, only boundaries and headers
+        if (str_starts_with(trim($body), '--') || str_contains($body, 'Content-Disposition:')) {
+            return null;
+        }
+        return ['prompt' => $body];
+    }
+
+    private function collectText(mixed $body, bool $systemOnly): string
+    {
+        $body = $this->normalizeBody($body);
         if (!is_array($body)) {
             return '';
+        }
+        if ($systemOnly === false && ($body['messages'] ?? null) === null && is_string($body['prompt'] ?? null)) {
+            return trim(preg_replace('/\s+/', ' ', $body['prompt']) ?? $body['prompt']);
         }
         $text = '';
         if (is_string($body['system'] ?? null)) {
@@ -944,8 +969,9 @@ final class Admin
     }
 
     // short, sanitized preview of the current user prompt for the table
-    private function promptExcerpt(?array $body): string
+    private function promptExcerpt(mixed $body): string
     {
+        $body = $this->normalizeBody($body);
         $text = $this->collectText($body, false);
         if ($text === '' && is_string($body['prompt'] ?? null)) {
             $text = trim(preg_replace('/\s+/', ' ', $body['prompt']) ?? $body['prompt']);
@@ -955,7 +981,7 @@ final class Admin
 
     // no source/referrer exists, so derive a stable identity from the prompt itself:
     // the system prompt is fixed per integration; templated user prompts share a stable prefix
-    private function promptSignature(?array $body): array
+    private function promptSignature(mixed $body): array
     {
         $basis = $this->collectText($body, true);
         if ($basis === '') {
