@@ -160,14 +160,17 @@ class Admin {
         let tick = () => {
             let now = Math.floor(Date.now() / 1000);
             $els.forEach($el => {
-                $el.textContent = this.formatDuration(parseInt($el.getAttribute('data-reset')!, 10) - now);
+                $el.textContent = this.formatDuration(
+                    parseInt($el.getAttribute('data-reset')!, 10) - now,
+                    $el.dataset.compact === '1'
+                );
             });
         };
         tick();
         this.countdownTimer = setInterval(tick, 1000);
     }
 
-    formatDuration(seconds: number) {
+    formatDuration(seconds: number, compact = false) {
         if (seconds <= 0) {
             return 'now';
         }
@@ -175,6 +178,18 @@ class Admin {
         let h = Math.floor((seconds % 86400) / 3600);
         let m = Math.floor((seconds % 3600) / 60);
         let s = Math.floor(seconds % 60);
+        if (compact) {
+            if (d) {
+                return `${d}d ${h}h`;
+            }
+            if (h) {
+                return `${h}h ${m}m`;
+            }
+            if (m) {
+                return `${m}m`;
+            }
+            return `${s}s`;
+        }
         let parts = [];
         if (d) {
             parts.push(d + 'd');

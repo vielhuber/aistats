@@ -52,12 +52,9 @@ final class Admin
     private array $usageTools = [];
     private array $resetCredits = [];
 
-    private ?array $estimate = null;
-    private int $recentRequests = 0;
-    private bool $idle = false;
-    private string $estimateSeverity = 'ok';
+    private array $estimates = [];
     private ?array $recommended = null;
-    private ?array $promptStats = null;
+    private array $promptStatsByTool = [];
 
     private string $renderedAt = '';
     private array $baseParams = [];
@@ -215,7 +212,9 @@ final class Admin
             'Location: ' .
                 strtok((string) $_SERVER['REQUEST_URI'], '?') .
                 '?resetresult=' .
-                rawurlencode($result === null ? 'unsupported' : (string) ($result['status'] ?? 'error'))
+                rawurlencode($result === null ? 'unsupported' : (string) ($result['status'] ?? 'error')) .
+                '&resettool=' .
+                rawurlencode($toolLabel)
         );
         exit();
     }
@@ -613,7 +612,7 @@ final class Admin
             fclose($lock);
         }
         if ($redeemed === true) {
-            header('Location: ' . strtok((string) $_SERVER['REQUEST_URI'], '?') . '?resetresult=reset');
+            header('Location: ' . strtok((string) $_SERVER['REQUEST_URI'], '?') . '?resetresult=reset&resettool=Codex');
             exit();
         }
     }
@@ -621,16 +620,13 @@ final class Admin
     // pace estimator: project each usage window to its reset using the ACTUAL token consumption from
     // the logs (not wall-clock). the endpoint's used% only calibrates tokens<->%; the recent token
     // rate drives the projection, so it goes flat when idle instead of assuming linear-over-time growth.
-    // surfaces the window (5-hour or weekly, claude or codex) that projects worst.
     private function buildEstimate(): void
     {
         $windowSeconds = ['5-hour' => 5 * 3600, 'weekly' => 7 * 86400];
         $now = time();
 
-        [$tokensInWindow, $recentTokens, $this->recentRequests, $avgPromptSeconds, $promptTurnCount] = $this->usageTokenPace(
-            $windowSeconds
-        );
-        $this->idle = $this->recentRequests === 0;
+        [$tokensInWindow, $recentTokens, $recentRequestsByTool, $avgPromptSecondsByTool, $promptTurnCountByTool] =
+            $this->usageTokenPace($windowSeconds);
 
         foreach ($this->usageTools as $toolLabel => $limits) {
             foreach ($limits ?? [] as $usageLimit) {
@@ -645,16 +641,16 @@ final class Admin
                     continue;
                 }
                 if ($used >= 100) {
-                    $this->estimate = [
+                    $this->estimates[$toolLabel] = [
                         'tool' => $toolLabel,
                         'type' => $limitLabel,
                         'used' => 100,
                         'projected' => 100,
                         'resetTs' => $resetTs,
-                        'exhausted' => true
+                        'exhausted' => true,
+                        'severity' => 'crit'
                     ];
-                    $this->estimateSeverity = 'crit';
-                    break 2;
+                    break;
                 }
                 $windowTokens = $tokensInWindow[$toolLabel][$type] ?? 0;
                 $recentWindowTokens = $recentTokens[$toolLabel] ?? 0;
@@ -680,9 +676,7 @@ final class Admin
                     'hitTs' => $hitTs,
                     'throttle' => $throttle
                 ];
-                // surface the binding constraint: among windows projected to blow past 100%, the one
-                // that hits SOONEST (you get blocked by it first); if none exceed, the highest projected
-                $current = $this->estimate;
+                $current = $this->estimates[$toolLabel] ?? null;
                 $take = $current === null;
                 if ($current !== null) {
                     $candidateCrit = $projected >= 100;
@@ -696,17 +690,21 @@ final class Admin
                     }
                 }
                 if ($take) {
-                    $this->estimate = $candidate;
+                    $this->estimates[$toolLabel] = $candidate;
                 }
             }
         }
 
-        if (!$this->idle && $this->estimate !== null) {
-            $this->estimateSeverity = $this->estimate['projected'] >= 100 ? 'crit' : ($this->estimate['projected'] >= 80 ? 'warn' : 'ok');
-        }
-        if ($this->estimateSeverity === 'crit' && !($this->estimate['exhausted'] ?? false)) {
-            // how long you would sit blocked between hitting the limit and the window reset
-            $gap = max(0, $this->estimate['resetTs'] - $this->estimate['hitTs']);
+        foreach ($this->estimates as $toolLabel => &$estimate) {
+            if (($estimate['exhausted'] ?? false) !== true) {
+                $estimate['severity'] = ($recentRequestsByTool[$toolLabel] ?? 0) === 0
+                    ? 'ok'
+                    : ($estimate['projected'] >= 100 ? 'crit' : ($estimate['projected'] >= 80 ? 'warn' : 'ok'));
+            }
+            if ($estimate['severity'] !== 'crit' || ($estimate['exhausted'] ?? false) === true) {
+                continue;
+            }
+            $gap = max(0, $estimate['resetTs'] - $estimate['hitTs']);
             $gapParts = [];
             if (intdiv($gap, 86400) > 0) {
                 $gapParts[] = intdiv($gap, 86400) . 'd';
@@ -718,13 +716,9 @@ final class Admin
                 $gapParts[] = intdiv($gap % 3600, 60) . 'm';
             }
             $gapParts[] = ($gap % 60) . 's';
-            $this->estimate['gapLabel'] = implode(' ', $gapParts);
-            $throttle = $this->estimate['throttle'];
-            $this->estimate['throttleLabel'] =
-                $throttle >= 75
-                    ? 'throttle hard'
-                    : ($throttle >= 50 ? 'throttle strongly' : ($throttle >= 25 ? 'throttle moderately' : 'throttle a little'));
+            $estimate['gapLabel'] = implode(' ', $gapParts);
         }
+        unset($estimate);
 
         // recommend the workhorse (claude vs codex) with the most headroom = lowest binding usage %
         foreach (['Claude' => 'claude', 'Codex' => 'codex'] as $toolLabel => $name) {
@@ -745,10 +739,12 @@ final class Admin
             }
         }
 
-        // header stats: how many prompts of average duration still fit until the SOONEST upcoming
-        // window reset (pure time capacity — the pace estimator above covers the quota side)
-        $nextResetTs = null;
-        foreach ($this->usageTools as $limits) {
+        foreach ($this->usageTools as $toolLabel => $limits) {
+            $avgPromptSeconds = $avgPromptSecondsByTool[$toolLabel] ?? null;
+            if (!is_numeric($avgPromptSeconds) || $avgPromptSeconds <= 0 || ($this->estimates[$toolLabel]['exhausted'] ?? false)) {
+                continue;
+            }
+            $nextResetTs = null;
             foreach ($limits ?? [] as $usageLimit) {
                 if (self::isModelSpecific($usageLimit)) {
                     continue;
@@ -758,12 +754,13 @@ final class Admin
                     $nextResetTs = $resetTs;
                 }
             }
-        }
-        if ($avgPromptSeconds !== null && $avgPromptSeconds > 0) {
-            $this->promptStats = [
+            if ($nextResetTs === null) {
+                continue;
+            }
+            $this->promptStatsByTool[$toolLabel] = [
                 'avgSeconds' => (float) $avgPromptSeconds,
-                'turns' => $promptTurnCount,
-                'left' => $nextResetTs !== null ? (int) floor(($nextResetTs - $now) / $avgPromptSeconds) : null,
+                'turns' => (int) ($promptTurnCountByTool[$toolLabel] ?? 0),
+                'left' => (int) floor(($nextResetTs - $now) / $avgPromptSeconds),
                 'resetTs' => $nextResetTs
             ];
         }
@@ -772,26 +769,29 @@ final class Admin
     // tokens spent per tool (Claude/Codex/OpenCode) within each usage window + over the last hour (= current
     // pace), and the request count in the last hour (idle gate), from a dedicated log scan over the
     // widest window. cached briefly since this repeats the table's scan on every 3m auto-refresh.
-    // Returns aggregate and per-model token pace, the recent request count and the average prompt
-    // duration (first-to-last api call of a cli turn) with its sample size.
+    // Returns aggregate and per-model token pace plus per-tool request and prompt-duration statistics.
     private function usageTokenPace(array $windowSeconds): array
     {
         $now = time();
         $cacheFile =
             sys_get_temp_dir() . '/aistats-pace-' . (function_exists('posix_geteuid') ? posix_geteuid() : getmyuid()) . '.json';
         $cached = is_file($cacheFile) ? json_decode((string) file_get_contents($cacheFile), true) : null;
-        if (is_array($cached) && $now - (int) ($cached['time'] ?? 0) < 120 && array_key_exists('avgPromptSeconds', $cached)) {
+        if (
+            is_array($cached) &&
+            $now - (int) ($cached['time'] ?? 0) < 120 &&
+            array_key_exists('avgPromptSecondsByTool', $cached)
+        ) {
             return [
                 $cached['inWindow'] ?? [],
                 $cached['recent'] ?? [],
-                (int) ($cached['recentReq'] ?? 0),
-                $cached['avgPromptSeconds'],
-                (int) ($cached['promptTurns'] ?? 0)
+                $cached['recentReqByTool'] ?? [],
+                $cached['avgPromptSecondsByTool'] ?? [],
+                $cached['promptTurnsByTool'] ?? []
             ];
         }
         $inWindow = [];
         $recent = [];
-        $recentReq = 0;
+        $recentReqByTool = [];
         $turnRows = [];
         $directTurnDurations = [];
         $rows = aihelper::getCliApiRequests(date_from: date('Y-m-d H:i:s', $now - max($windowSeconds)));
@@ -800,24 +800,8 @@ final class Admin
             if ($ts === false) {
                 continue;
             }
-            if ($ts >= $now - 3600) {
-                $recentReq++;
-            }
-            // attribute the request to the tool whose usage limit it consumes: claude-code → Claude,
-            // codex → Codex, opencode → OpenCode, proxy → by model
             $source = (string) ($row['source'] ?? '');
             $model = strtolower((string) ($row['model'] ?? ''));
-            // collect cli turns for the avg prompt duration: rows of the same session sharing the
-            // same user prompt form one turn (proxy calls are one file per request, so no span there)
-            if ($source === 'claude-code' || $source === 'codex') {
-                $promptKey = explode('|', (string) ($row['group_key'] ?? ''), 3)[2] ?? '';
-                if ($promptKey !== '' && !str_starts_with($promptKey, 'session:')) {
-                    $turnRows[(string) ($row['file'] ?? '')][] = [$ts, $promptKey];
-                }
-            }
-            if ($source === 'opencode' && (int) ($row['duration_in_ms'] ?? 0) > 0) {
-                $directTurnDurations[] = (int) round((int) $row['duration_in_ms'] / 1000);
-            }
             $tool = null;
             if ($source === 'claude-code' || ($source === 'proxy' && str_contains($model, 'claude'))) {
                 $tool = 'Claude';
@@ -828,9 +812,27 @@ final class Admin
                 $tool = 'Codex';
             } elseif ($source === 'opencode') {
                 $tool = 'OpenCode';
+            } elseif (
+                $source === 'antigravity' ||
+                ($source === 'proxy' &&
+                    (str_contains($model, 'gemini') || str_contains($model, 'antigravity') || str_contains($model, 'agy')))
+            ) {
+                $tool = 'Antigravity';
             }
             if ($tool === null) {
                 continue;
+            }
+            if ($ts >= $now - 3600) {
+                $recentReqByTool[$tool] = ($recentReqByTool[$tool] ?? 0) + 1;
+            }
+            if ($source === 'claude-code' || $source === 'codex') {
+                $promptKey = explode('|', (string) ($row['group_key'] ?? ''), 3)[2] ?? '';
+                if ($promptKey !== '' && !str_starts_with($promptKey, 'session:')) {
+                    $turnRows[$tool][(string) ($row['file'] ?? '')][] = [$ts, $promptKey];
+                }
+            }
+            if ($source === 'opencode' && (int) ($row['duration_in_ms'] ?? 0) > 0) {
+                $directTurnDurations[$tool][] = (int) round((int) $row['duration_in_ms'] / 1000);
             }
             // input+output only — cache-read tokens are huge but heavily discounted, so counting them
             // would distort the pace; the used%↔token calibration just needs a stable proxy
@@ -847,41 +849,49 @@ final class Admin
                 $recent[$tool] = ($recent[$tool] ?? 0) + $tokens;
             }
         }
-        // turn duration = span from first to last logged call of the turn; single-call turns carry
-        // no measurable span and would drag the average to zero, so they are skipped
-        $turnDurations = $directTurnDurations;
-        foreach ($turnRows as $sessionRows) {
-            usort($sessionRows, fn($a, $b) => $a[0] <=> $b[0]);
-            $turnStart = null;
-            $turnEnd = null;
-            $turnPrompt = null;
-            foreach ($sessionRows as [$rowTs, $promptKey]) {
-                if ($promptKey !== $turnPrompt) {
-                    if ($turnStart !== null && $turnEnd > $turnStart) {
-                        $turnDurations[] = $turnEnd - $turnStart;
+        $turnDurationsByTool = $directTurnDurations;
+        foreach ($turnRows as $toolLabel => $toolSessions) {
+            foreach ($toolSessions as $sessionRows) {
+                usort($sessionRows, fn($a, $b) => $a[0] <=> $b[0]);
+                $turnStart = null;
+                $turnEnd = null;
+                $turnPrompt = null;
+                foreach ($sessionRows as [$rowTs, $promptKey]) {
+                    if ($promptKey !== $turnPrompt) {
+                        if ($turnStart !== null && $turnEnd > $turnStart) {
+                            $turnDurationsByTool[$toolLabel][] = $turnEnd - $turnStart;
+                        }
+                        $turnPrompt = $promptKey;
+                        $turnStart = $rowTs;
                     }
-                    $turnPrompt = $promptKey;
-                    $turnStart = $rowTs;
+                    $turnEnd = $rowTs;
                 }
-                $turnEnd = $rowTs;
-            }
-            if ($turnStart !== null && $turnEnd > $turnStart) {
-                $turnDurations[] = $turnEnd - $turnStart;
+                if ($turnStart !== null && $turnEnd > $turnStart) {
+                    $turnDurationsByTool[$toolLabel][] = $turnEnd - $turnStart;
+                }
             }
         }
-        $avgPromptSeconds = $turnDurations !== [] ? array_sum($turnDurations) / count($turnDurations) : null;
+        $avgPromptSecondsByTool = [];
+        $promptTurnsByTool = [];
+        foreach ($turnDurationsByTool as $toolLabel => $turnDurations) {
+            if ($turnDurations === []) {
+                continue;
+            }
+            $avgPromptSecondsByTool[$toolLabel] = array_sum($turnDurations) / count($turnDurations);
+            $promptTurnsByTool[$toolLabel] = count($turnDurations);
+        }
         @file_put_contents(
             $cacheFile,
             json_encode([
                 'time' => $now,
                 'inWindow' => $inWindow,
                 'recent' => $recent,
-                'recentReq' => $recentReq,
-                'avgPromptSeconds' => $avgPromptSeconds,
-                'promptTurns' => count($turnDurations)
+                'recentReqByTool' => $recentReqByTool,
+                'avgPromptSecondsByTool' => $avgPromptSecondsByTool,
+                'promptTurnsByTool' => $promptTurnsByTool
             ])
         );
-        return [$inWindow, $recent, $recentReq, $avgPromptSeconds, count($turnDurations)];
+        return [$inWindow, $recent, $recentReqByTool, $avgPromptSecondsByTool, $promptTurnsByTool];
     }
 
     private function tokensIn(?array $usage): ?int
@@ -1138,8 +1148,140 @@ final class Admin
             <a class="logout" href="?logout">logout</a>
         </header>
         <div class="wrap">
-            <div class="top">
+            <div class="usage-overview">
                 <div class="panel">
+                    <h2>Usage limits</h2>
+                    <?php if (empty($this->usageTools)): ?>
+                        <div class="muted">No usage data available.</div>
+                    <?php endif; ?>
+                    <?php
+                    $scopedCount = 0;
+                    $usageCategories = [];
+                    $usageLimitsByTool = [];
+                    $scopedUsageLimitsByTool = [];
+                    foreach ($this->usageTools as $toolLabel => $limits) {
+                        foreach ($limits ?? [] as $usageLimit) {
+                            if (self::isModelSpecific($usageLimit)) {
+                                $scopedCount++;
+                                $scopedUsageLimitsByTool[$toolLabel][] = $usageLimit;
+                                continue;
+                            }
+                            $usageCategory = trim((string) ($usageLimit['type'] ?? ''));
+                            if ($usageCategory === '') {
+                                continue;
+                            }
+                            $usageCategories[$usageCategory] = true;
+                            $usageLimitsByTool[$toolLabel][$usageCategory] = $usageLimit;
+                        }
+                    }
+                    $usageCategories = array_keys($usageCategories);
+                    ?>
+                    <div class="usage-tools">
+                        <?php foreach ($this->usageTools as $toolLabel => $limits): ?>
+                            <div class="usage-tool">
+                                <?php $credits = $this->resetCredits[$toolLabel] ?? null; ?>
+                                <?php $isRecommended = ($this->recommended['name'] ?? null) === strtolower($toolLabel); ?>
+                                <div class="toolname">
+                                    <?= $h($toolLabel) ?>
+                                    <?php if ($credits !== null && (int) ($credits['available_count'] ?? 0) > 0): ?>
+                                        <?php $creditExpiry = $credits['credits'][0]['expires_at'] ?? null; ?>
+                                        <form method="post" onsubmit="return confirm('Redeem one <?= $h($toolLabel) ?> rate-limit reset credit now?')">
+                                            <input type="hidden" name="action" value="reset">
+                                            <input type="hidden" name="tool" value="<?= $h($toolLabel) ?>">
+                                            <button type="submit" style="background:none;border:none;padding:0;font:inherit;color:#4dd2ff;cursor:pointer;text-decoration:underline" title="<?= $creditExpiry !== null ? 'next credit expires ' . $h($this->fmtReset((string) $creditExpiry)) : 'redeem one reset credit' ?>">reset now (<?= (int) $credits['available_count'] ?> left)</button>
+                                        </form>
+                                    <?php elseif ($credits !== null): ?>
+                                        <span style="color:#6b7280">0 resets left</span>
+                                    <?php else: ?>
+                                        <span style="color:#6b7280">reset function not provided</span>
+                                    <?php endif; ?>
+                                </div>
+                                <?php $toolEstimate = $this->estimates[$toolLabel] ?? null; ?>
+                                <?php $toolPromptStats = $this->promptStatsByTool[$toolLabel] ?? null; ?>
+                                <?php $resetResult = (string) ($_GET['resetresult'] ?? ''); ?>
+                                <?php $resetTool = (string) ($_GET['resettool'] ?? ''); ?>
+                                <div class="usage-tool-messages">
+                                    <?php if ($isRecommended): ?>
+                                        <div class="estimate-mini ok">
+                                            ✅ recommended · <?= $fmt(round($this->recommended['free'])) ?>% free
+                                        </div>
+                                    <?php endif; ?>
+                                    <?php if ($resetResult !== '' && $resetTool === $toolLabel): ?>
+                                        <div class="estimate-mini <?= $resetResult === 'reset' ? 'ok' : 'crit' ?>">
+                                            <?= $resetResult === 'reset' ? '✅ reset credit redeemed — limits are refreshing' : '⚠️ reset failed: ' . $h($resetResult) ?>
+                                        </div>
+                                    <?php endif; ?>
+                                    <?php if (!is_array($limits)): ?>
+                                        <div class="estimate-mini crit">⛔ no data</div>
+                                    <?php endif; ?>
+                                    <?php if (($toolEstimate['severity'] ?? 'ok') === 'crit'): ?>
+                                        <div class="estimate-mini crit">
+                                            <?php if (($toolEstimate['exhausted'] ?? false) === true): ?>
+                                                ⛔ <?= $h($toolEstimate['type']) ?> limit is exhausted
+                                            <?php else: ?>
+                                                <span title="projected blocked gap: <?= $h($toolEstimate['gapLabel']) ?>; reduce pace by at least <?= (int) $toolEstimate['throttle'] ?>%">⛔ <?= $h($toolEstimate['type']) ?> in <span class="countdown" data-reset="<?= (int) $toolEstimate['hitTs'] ?>" data-compact="1"></span> · −<?= (int) $toolEstimate['throttle'] ?>%</span>
+                                            <?php endif; ?>
+                                        </div>
+                                    <?php elseif (($toolEstimate['severity'] ?? 'ok') === 'warn'): ?>
+                                        <div class="estimate-mini warn">
+                                            ⚠️ <?= $h($toolEstimate['type']) ?> trending to ≈<?= $fmt(round($toolEstimate['projected'])) ?>% by reset
+                                        </div>
+                                    <?php elseif ($toolPromptStats !== null && !$isRecommended): ?>
+                                        <?php
+                                        $avgSeconds = (int) round($toolPromptStats['avgSeconds']);
+                                        $avgLabel =
+                                            $avgSeconds >= 3600
+                                                ? intdiv($avgSeconds, 3600) . 'h ' . intdiv($avgSeconds % 3600, 60) . 'm'
+                                                : ($avgSeconds >= 60
+                                                    ? intdiv($avgSeconds, 60) . 'm ' . ($avgSeconds % 60) . 's'
+                                                    : $avgSeconds . 's');
+                                        ?>
+                                        <div class="estimate-mini warn">
+                                            ⚠️ ≈<b><?= $fmt($toolPromptStats['left']) ?> prompts</b> · <span class="countdown" data-reset="<?= (int) $toolPromptStats['resetTs'] ?>" data-compact="1"></span> · ⌀ <b><?= $h($avgLabel) ?></b>
+                                        </div>
+                                    <?php endif; ?>
+                                </div>
+                                <?php
+                                $displayLimits = [];
+                                foreach ($usageCategories as $usageCategory) {
+                                    $displayLimits[] = $usageLimitsByTool[$toolLabel][$usageCategory] ?? [
+                                        'type' => $usageCategory,
+                                        'scope' => null,
+                                        'undefined' => true
+                                    ];
+                                }
+                                array_push($displayLimits, ...($scopedUsageLimitsByTool[$toolLabel] ?? []));
+                                ?>
+                                <?php foreach ($displayLimits as $usageLimit): ?>
+                                    <?php $undefined = ($usageLimit['undefined'] ?? false) === true; ?>
+                                    <?php $percent = $undefined ? 0 : (int) $usageLimit['percent used']; ?>
+                                    <?php $scope = trim((string) ($usageLimit['scope'] ?? '')); ?>
+                                    <div class="usage-row<?= $scope !== '' ? ' usage-row--scoped' : '' ?><?= $undefined ? ' usage-row--undefined' : '' ?>">
+                                        <div class="head">
+                                            <b><?= $scope !== '' ? $h($scope) . ' · ' : '' ?><?= $h($usageLimit['type']) ?> · <?= $undefined ? '—' : $percent . '%' ?></b>
+                                            <?php $resetTs = $undefined ? false : strtotime((string) ($usageLimit['resets_at'] ?? '')); ?>
+                                            <?php if ($undefined): ?>
+                                                <span class="reset">not defined</span>
+                                            <?php elseif ($resetTs !== false): ?>
+                                                <span class="reset" title="<?= $h($this->fmtReset($usageLimit['resets_at'])) ?>">resets in <span class="countdown" data-reset="<?= $resetTs ?>"></span></span>
+                                            <?php elseif (($usageLimit['estimated'] ?? false) === true): ?>
+                                                <span class="reset" title="Calculated only from the local OpenCode database; other devices and server-side adjustments are not included.">$<?= $h(number_format((float) ($usageLimit['used_usd'] ?? 0), 2)) ?> / $<?= $h(number_format((float) ($usageLimit['limit_usd'] ?? 0), 0)) ?> · local estimate</span>
+                                            <?php endif; ?>
+                                        </div>
+                                        <div class="bar"><span<?= $undefined ? '' : ' style="width: ' . max(2, $percent) . '%; background: ' . $this->usageColor($percent) . ';"' ?>></span></div>
+                                    </div>
+                                <?php endforeach; ?>
+                            </div>
+                        <?php endforeach; ?>
+                    </div>
+                    <?php if ($scopedCount > 0): ?>
+                        <button type="button" id="scopedtoggle" class="scoped-toggle" data-count="<?= $scopedCount ?>" title="model-specific windows are excluded from pace, warnings and the reset countdown">show <?= $scopedCount ?> model-specific limits</button>
+                    <?php endif; ?>
+                </div>
+            </div>
+
+            <div class="charts">
+                <div class="chart-box api-access">
                     <h2>API access</h2>
                     <div class="kv">
                         <div class="k">Endpoint (OpenAI-compatible)</div>
@@ -1155,102 +1297,6 @@ final class Admin
                         <div class="kv"><div class="v muted">No API keys found in config.yaml.</div></div>
                     <?php endif; ?>
                 </div>
-                <div class="panel">
-                    <h2>Usage limits</h2>
-                    <?php if (($_GET['resetresult'] ?? '') !== ''): ?>
-                        <?php $resetResult = (string) $_GET['resetresult']; ?>
-                        <div class="recommend"<?= $resetResult !== 'reset' ? ' style="background:#2b1417;border-color:#5c2626;color:#f0a0a0"' : '' ?>>
-                            <?= $resetResult === 'reset' ? '✅ reset credit redeemed — limits are refreshing' : '⚠️ reset failed: ' . $h($resetResult) ?>
-                        </div>
-                    <?php endif; ?>
-                    <?php if ($this->recommended !== null): ?>
-                        <div class="recommend">✅ recommended model currently: <b><?= $h($this->recommended['name']) ?></b> · <?= $fmt(round($this->recommended['free'])) ?>% free</div>
-                    <?php endif; ?>
-                    <div class="estimate-mini <?= $this->estimateSeverity ?>">
-                        <?php if (($this->estimate['exhausted'] ?? false) === true): ?>
-                            ⛔ <?= $h($this->estimate['tool']) ?> is exhausted.
-                        <?php elseif ($this->idle): ?>
-                            idle — nothing on pace
-                        <?php elseif ($this->estimate === null): ?>
-                            too early to project
-                        <?php elseif ($this->estimateSeverity === 'crit'): ?>
-                            ⛔ at this pace: <?= $h($this->estimate['tool']) ?> <?= $h($this->estimate['type']) ?> hits in <span class="countdown" data-reset="<?= (int) $this->estimate['hitTs'] ?>"></span>! · gap <?= $h($this->estimate['gapLabel']) ?> · reset in <span class="countdown" data-reset="<?= (int) $this->estimate['resetTs'] ?>"></span> · <span title="reduce pace by at least <?= (int) $this->estimate['throttle'] ?>% to make it to the reset"><?= $h($this->estimate['throttleLabel']) ?></span>
-                        <?php elseif ($this->estimateSeverity === 'warn'): ?>
-                            trending: <?= $h($this->estimate['tool']) ?> <?= $h($this->estimate['type']) ?> ≈<?= $fmt(round($this->estimate['projected'])) ?>% by reset
-                        <?php else: ?>
-                            ✅ on pace
-                        <?php endif; ?>
-                    </div>
-                    <?php if ($this->promptStats !== null): ?>
-                        <?php
-                        $avgSeconds = (int) round($this->promptStats['avgSeconds']);
-                        $avgLabel =
-                            $avgSeconds >= 3600
-                                ? intdiv($avgSeconds, 3600) . 'h ' . intdiv($avgSeconds % 3600, 60) . 'm'
-                                : ($avgSeconds >= 60 ? intdiv($avgSeconds, 60) . 'm ' . ($avgSeconds % 60) . 's' : $avgSeconds . 's');
-                        ?>
-                        <div class="estimate-mini warn">
-                            <?php if ($this->promptStats['left'] !== null): ?>
-                                ≈<b><?= $fmt($this->promptStats['left']) ?> prompts left</b> until next reset (in <span class="countdown" data-reset="<?= (int) $this->promptStats['resetTs'] ?>"></span>) ·
-                            <?php endif; ?>
-                            ⌀ <b><?= $h($avgLabel) ?> per prompt</b> · avg over <?= $fmt($this->promptStats['turns']) ?> cli prompts (last 7 days)
-                        </div>
-                    <?php endif; ?>
-                    <?php if (empty($this->usageTools)): ?>
-                        <div class="muted">No usage data available.</div>
-                    <?php endif; ?>
-                    <?php
-                    $scopedCount = 0;
-                    foreach ($this->usageTools as $limits) {
-                        foreach ($limits ?? [] as $usageLimit) {
-                            $scopedCount += self::isModelSpecific($usageLimit) ? 1 : 0;
-                        }
-                    }
-                    ?>
-                    <?php foreach ($this->usageTools as $toolLabel => $limits): ?>
-                        <?php $credits = $this->resetCredits[$toolLabel] ?? null; ?>
-                        <div class="toolname">
-                            <?= $h($toolLabel) ?>
-                            <?php if ($credits !== null && (int) ($credits['available_count'] ?? 0) > 0): ?>
-                                <?php $creditExpiry = $credits['credits'][0]['expires_at'] ?? null; ?>
-                                <form method="post" onsubmit="return confirm('Redeem one <?= $h($toolLabel) ?> rate-limit reset credit now?')">
-                                    <input type="hidden" name="action" value="reset">
-                                    <input type="hidden" name="tool" value="<?= $h($toolLabel) ?>">
-                                    <button type="submit" style="background:none;border:none;padding:0;font:inherit;color:#4dd2ff;cursor:pointer;text-decoration:underline" title="<?= $creditExpiry !== null ? 'next credit expires ' . $h($this->fmtReset((string) $creditExpiry)) : 'redeem one reset credit' ?>">reset now (<?= (int) $credits['available_count'] ?> left)</button>
-                                </form>
-                            <?php elseif ($credits !== null): ?>
-                                <span style="color:#6b7280">0 resets left</span>
-                            <?php else: ?>
-                                <span style="color:#6b7280">reset function not provided</span>
-                            <?php endif; ?>
-                        </div>
-                        <?php if (empty($limits)): ?>
-                            <div class="muted" style="font-size:12px">no data (no auth token or endpoint error)</div>
-                        <?php endif; ?>
-                        <?php foreach ($limits ?? [] as $usageLimit): ?>
-                            <?php $percent = (int) $usageLimit['percent used']; ?>
-                            <?php $scope = trim((string) ($usageLimit['scope'] ?? '')); ?>
-                            <div class="usage-row<?= $scope !== '' ? ' usage-row--scoped' : '' ?>">
-                                <div class="head">
-                                    <b><?= $scope !== '' ? $h($scope) . ' · ' : '' ?><?= $h($usageLimit['type']) ?> · <?= $percent ?>%</b>
-                                    <?php $resetTs = strtotime((string) ($usageLimit['resets_at'] ?? '')); ?>
-                                    <?php if ($resetTs !== false): ?>
-                                        <span class="reset" title="<?= $h($this->fmtReset($usageLimit['resets_at'])) ?>">resets in <span class="countdown" data-reset="<?= $resetTs ?>"></span></span>
-                                    <?php elseif (($usageLimit['estimated'] ?? false) === true): ?>
-                                        <span class="reset" title="Calculated only from the local OpenCode database; other devices and server-side adjustments are not included.">$<?= $h(number_format((float) ($usageLimit['used_usd'] ?? 0), 2)) ?> / $<?= $h(number_format((float) ($usageLimit['limit_usd'] ?? 0), 0)) ?> · local estimate</span>
-                                    <?php endif; ?>
-                                </div>
-                                <div class="bar"><span style="width: <?= max(2, $percent) ?>%; background: <?= $this->usageColor($percent) ?>;"></span></div>
-                            </div>
-                        <?php endforeach; ?>
-                    <?php endforeach; ?>
-                    <?php if ($scopedCount > 0): ?>
-                        <button type="button" id="scopedtoggle" class="scoped-toggle" data-count="<?= $scopedCount ?>" title="model-specific windows are excluded from pace, warnings and the reset countdown">show <?= $scopedCount ?> model-specific limits</button>
-                    <?php endif; ?>
-                </div>
-            </div>
-
-            <div class="charts">
                 <div class="chart-box"><h2>Requests per day</h2><div class="canvas-wrap"><canvas id="chartDay"></canvas></div></div>
                 <div class="chart-box"><h2>Models used</h2><div class="canvas-wrap"><canvas id="chartModel"></canvas></div></div>
                 <div class="chart-box"><h2>Status</h2><div class="canvas-wrap"><canvas id="chartStatus"></canvas></div></div>
