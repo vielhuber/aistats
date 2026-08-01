@@ -1201,20 +1201,17 @@ final class Admin
                                 <?php $resetResult = (string) ($_GET['resetresult'] ?? ''); ?>
                                 <?php $resetTool = (string) ($_GET['resettool'] ?? ''); ?>
                                 <div class="usage-tool-messages">
-                                    <?php if ($isRecommended): ?>
-                                        <div class="estimate-mini ok">
-                                            ✅ recommended · <?= $fmt(round($this->recommended['free'])) ?>% free
-                                        </div>
-                                    <?php endif; ?>
                                     <?php if ($resetResult !== '' && $resetTool === $toolLabel): ?>
                                         <div class="estimate-mini <?= $resetResult === 'reset' ? 'ok' : 'crit' ?>">
                                             <?= $resetResult === 'reset' ? '✅ reset credit redeemed — limits are refreshing' : '⚠️ reset failed: ' . $h($resetResult) ?>
                                         </div>
-                                    <?php endif; ?>
-                                    <?php if (!is_array($limits)): ?>
+                                    <?php elseif (!is_array($limits)): ?>
                                         <div class="estimate-mini crit">⛔ no data</div>
-                                    <?php endif; ?>
-                                    <?php if (($toolEstimate['severity'] ?? 'ok') === 'crit'): ?>
+                                    <?php elseif ($isRecommended): ?>
+                                        <div class="estimate-mini ok">
+                                            ✅ recommended · <?= $fmt(round($this->recommended['free'])) ?>% free
+                                        </div>
+                                    <?php elseif (($toolEstimate['severity'] ?? 'ok') === 'crit'): ?>
                                         <div class="estimate-mini crit">
                                             <?php if (($toolEstimate['exhausted'] ?? false) === true): ?>
                                                 ⛔ <?= $h($toolEstimate['type']) ?> limit is exhausted
