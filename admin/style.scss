@@ -109,6 +109,7 @@ a:hover { text-decoration: underline; }
 .kv:last-child { margin-bottom: 0; }
 .kv .k { font-size: 11px; color: #8a92a3; }
 .kv .v { font-family: ui-monospace, "SF Mono", monospace; font-size: 13px; word-break: break-all; background: #0f1115; border: 1px solid #262a33; border-radius: 6px; padding: 6px 9px; margin-top: 3px; }
+.api-access .kv .v { white-space: nowrap; word-break: normal; overflow-x: auto; }
 
 .usage-row { margin-bottom: 14px; }
 .usage-row:last-child { margin-bottom: 0; }

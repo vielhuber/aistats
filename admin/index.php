@@ -92,6 +92,9 @@ final class Admin
         }
         $this->authUser = $env['AUTH_USER'] ?? '';
         $this->authPass = $env['AUTH_PASS'] ?? '';
+        if (isset($env['OPENCODE_GO_AUTH_COOKIE'])) {
+            putenv('OPENCODE_GO_AUTH_COOKIE=' . $env['OPENCODE_GO_AUTH_COOKIE']);
+        }
     }
 
     private function handleLogout(): void
