@@ -771,7 +771,7 @@ final class Admin
 
     // tokens spent per tool (Claude/Codex/OpenCode) within each usage window + over the last hour (= current
     // pace), and the request count in the last hour (idle gate), from a dedicated log scan over the
-    // widest window. cached briefly since this repeats the table's scan on every 3m auto-refresh.
+    // widest window. cached briefly since this repeats the table's scan on every 15m auto-refresh.
     // Returns aggregate and per-model token pace plus per-tool request and prompt-duration statistics.
     private function usageTokenPace(array $windowSeconds): array
     {
@@ -1147,7 +1147,7 @@ final class Admin
             <div class="brand"><?php foreach (str_split('aistats') as $brandIndex => $brandChar): ?><span style="animation-delay: <?= $brandIndex * 0.14 ?>s"><?= $h($brandChar) ?></span><?php endforeach; ?></div>
             <div class="clock" title="last refresh"><?= $h($this->renderedAt) ?></div>
             <label class="toggle"><input type="checkbox" id="autocredit" data-cookie="<?= self::AUTO_CREDIT_COOKIE ?>" data-lifetime="<?= self::AUTO_CREDIT_LIFETIME ?>"<?= $this->autoCreditEnabled ? ' checked' : '' ?>> auto credit</label>
-            <label class="toggle"><input type="checkbox" id="autorefresh"> auto refresh (3m)</label>
+            <label class="toggle"><input type="checkbox" id="autorefresh"> auto refresh (15m)</label>
             <a class="logout" href="?logout">logout</a>
         </header>
         <div class="wrap">
