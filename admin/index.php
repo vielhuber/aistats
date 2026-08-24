@@ -15,8 +15,8 @@ final class Admin
 
     // provider, calibration model, auth file globs — shared by usage limits, reset credits and the reset action
     private const USAGE_TOOL_CONFIG = [
-        'Claude' => ['anthropic', 'claude-sonnet-4-5-20250929', ['/root/.claude/.credentials.json', '/root/.cli-proxy-api/claude*.json']],
         'Codex' => ['openai', 'gpt-5-codex', ['/root/.codex/auth.json', '/root/.cli-proxy-api/codex*.json']],
+        'Claude' => ['anthropic', 'claude-sonnet-4-5-20250929', ['/root/.claude/.credentials.json', '/root/.cli-proxy-api/claude*.json']],
         'OpenCode' => ['opencode', 'opencode-go/glm-5.2', ['/root/.local/share/opencode/opencode.db']],
         'Antigravity' => ['google', 'antigravity-gemini', ['/root/.gemini/antigravity-cli/antigravity-oauth-token', '/root/.cli-proxy-api/antigravity*.json']]
     ];
@@ -25,7 +25,7 @@ final class Admin
     private string $authPass = '';
     private bool $autoCreditEnabled = false;
 
-    private int $limit = 200;
+    private int $limit = 50;
     private string $dateFrom = '';
     private string $dateUntil = '';
     private string $search = '';
@@ -220,7 +220,7 @@ final class Admin
 
     private function collect(): void
     {
-        $this->limit = max(1, min(2000, (int) ($_GET['limit'] ?? 200)));
+        $this->limit = max(1, min(2000, (int) ($_GET['limit'] ?? 50)));
         $this->dateFrom = trim((string) ($_GET['from'] ?? ''));
         $this->dateUntil = trim((string) ($_GET['to'] ?? ''));
         $this->search = trim((string) ($_GET['q'] ?? ''));
@@ -398,7 +398,7 @@ final class Admin
             $family = $familyMap[$owner] ?? ($owner !== '' ? $owner : 'other');
             $byFamily[$family][$typeOf($modelId)][] = $modelId;
         }
-        $familyOrder = ['claude', 'codex', 'gemini', 'grok', 'deepseek'];
+        $familyOrder = ['codex', 'claude', 'gemini', 'grok', 'deepseek'];
         $families = array_keys($byFamily);
         usort($families, function ($a, $b) use ($familyOrder) {
             $ia = array_search($a, $familyOrder, true);
