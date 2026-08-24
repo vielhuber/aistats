@@ -45,7 +45,6 @@ header > * { display: flex; align-items: center; line-height: 1; }
 .models-inner h2 { flex: 0 0 auto; }
 .models-scroll { flex: 1; overflow-y: auto; min-height: 0; }
 @media (max-width: 900px) { .models-panel { position: static; overflow: visible; height: auto; } .models-inner { position: static; } }
-.calls { color: #8a92a3; font-variant-numeric: tabular-nums; }
 .card { background: #171a21; border: 1px solid #262a33; border-radius: 10px; padding: 14px 16px; }
 .card .label { font-size: 12px; color: #8a92a3; letter-spacing: .04em; }
 .card .value { font-size: 22px; font-weight: 600; margin-top: 4px; }
@@ -68,8 +67,6 @@ td.model, td.ua { max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
 td.prompt { max-width: 320px; overflow: hidden; text-overflow: ellipsis; color: #b8c0cf; white-space: nowrap; }
 .modellink { color: #cdd3de; }
 .modellink:hover { text-decoration: underline; }
-.grouptag { display: inline-block; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; padding: 1px 8px; border-radius: 6px; color: #e6e6e6; font-size: 12px; }
-.grouptag:hover { text-decoration: none; outline: 1px solid #5a6377; }
 .filter-active { margin-bottom: 12px; font-size: 13px; color: #b8c0cf; }
 
 .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }

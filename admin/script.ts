@@ -342,7 +342,6 @@ class Admin {
         this.bar('chartDay', data.byDay.labels, data.byDay.data);
         this.doughnut('chartModel', data.byModel.labels, data.byModel.data);
         this.doughnut('chartStatus', data.byStatus.labels, data.byStatus.data, data.byStatus.labels.map(($label: string) => Admin.STATUS_COLORS[$label] || '#94a3b8'));
-        this.hbar('chartGroup', data.byGroup.labels, data.byGroup.data);
     }
 
     bar(id: string, labels: string[], values: number[], color?: string) {
@@ -354,24 +353,6 @@ class Admin {
             type: 'bar',
             data: { labels, datasets: [{ data: values, backgroundColor: color || Admin.PALETTE[0], borderRadius: 4 }] },
             options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: this.axes }
-        }));
-    }
-
-    hbar(id: string, labels: string[], values: number[]) {
-        let $canvas = document.getElementById(id) as HTMLCanvasElement | null;
-        if (!$canvas) {
-            return;
-        }
-        this.charts.push(new Chart($canvas, {
-            type: 'bar',
-            data: { labels, datasets: [{ data: values, backgroundColor: Admin.PALETTE[4], borderRadius: 4 }] },
-            options: {
-                indexAxis: 'y',
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: { legend: { display: false } },
-                scales: { x: this.axes.y, y: { grid: { color: Admin.GRID }, ticks: { color: Admin.TICK } } }
-            }
         }));
     }
 

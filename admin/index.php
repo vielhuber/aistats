@@ -12,7 +12,6 @@ final class Admin
     private const AUTO_CREDIT_COOKIE = 'aistats_auto_credit';
     private const AUTO_CREDIT_LIFETIME = 180 * 24 * 3600;
     private string $logsDir = '/root/.cli-proxy-api/logs';
-    private array $groupPalette = ['#2b3a67', '#234d3a', '#5c4a1e', '#5c2626', '#3b2b52', '#1e4a52', '#5c2b46', '#33384a', '#4a4420', '#2f4d2f', '#472b5c', '#264b4b'];
 
     // provider, calibration model, auth file globs — shared by usage limits, reset credits and the reset action
     private const USAGE_TOOL_CONFIG = [
@@ -30,10 +29,8 @@ final class Admin
     private string $dateFrom = '';
     private string $dateUntil = '';
     private string $search = '';
-    private string $groupFilter = '';
     private string $modelFilter = '';
     private string $sourceFilter = '';
-    private string $groupby = 'project';
 
     private array $requests = [];
     private int $sumIn = 0;
@@ -42,7 +39,6 @@ final class Admin
     private array $models = [];
     private array $byDay = [];
     private array $byStatus = [];
-    private array $topGroups = [];
     private array $chartData = [];
 
     private string $apiBase = '';
@@ -228,80 +224,19 @@ final class Admin
         $this->dateFrom = trim((string) ($_GET['from'] ?? ''));
         $this->dateUntil = trim((string) ($_GET['to'] ?? ''));
         $this->search = trim((string) ($_GET['q'] ?? ''));
-        $this->groupFilter = trim((string) ($_GET['group'] ?? ''));
         $this->modelFilter = trim((string) ($_GET['model'] ?? ''));
         $this->sourceFilter = trim((string) ($_GET['source'] ?? ''));
-        $this->groupby = in_array($_GET['groupby'] ?? 'project', ['project', 'off'], true)
-            ? (string) ($_GET['groupby'] ?? 'project')
-            : 'project';
-        $grouped = $this->groupby !== 'off';
 
         $args = [
             'limit' => $this->limit,
             'date_from' => $this->dateFrom !== '' ? $this->dateFrom : null,
             'date_until' => $this->dateUntil !== '' ? $this->dateUntil : null,
-            'include_body' => true
+            'include_body' => true,
+            'group_by' => false
         ];
-        // aihelper renamed the grouping flag from `group` to `group_by` (both bool) — pass whichever the installed version exposes
-        $params = array_map(fn($param) => $param->getName(), (new \ReflectionMethod(aihelper::class, 'getCliApiRequests'))->getParameters());
-        if (in_array('group_by', $params, true)) {
-            $args['group_by'] = $grouped;
-        } elseif (in_array('group', $params, true)) {
-            $args['group'] = $grouped;
-        }
-        $dailyCacheFile =
-            sys_get_temp_dir() .
-            '/aistats-requests-per-day-' .
-            (function_exists('posix_geteuid') ? posix_geteuid() : getmyuid()) .
-            '-' .
-            md5(
-                json_encode(
-                    [
-                        'from' => $this->dateFrom,
-                        'to' => $this->dateUntil,
-                        'search' => $this->search,
-                        'group' => $this->groupFilter,
-                        'model' => $this->modelFilter,
-                        'source' => $this->sourceFilter
-                    ],
-                    JSON_THROW_ON_ERROR
-                )
-            ) .
-            '.json';
-        $dailyCache =
-            is_file($dailyCacheFile) && time() - (filemtime($dailyCacheFile) ?: 0) < 300
-                ? json_decode((string) file_get_contents($dailyCacheFile), true)
-                : null;
-        if (is_array($dailyCache)) {
-            $this->byDay = $dailyCache;
-        }
-        if (!is_array($dailyCache)) {
-            $dailyArgs = $args;
-            $dailyArgs['limit'] = null;
-            $dailyArgs['date_from'] = $this->dateFrom !== '' ? $this->dateFrom : '1970-01-01 00:00:00';
-            if (in_array('group_by', $params, true)) {
-                $dailyArgs['group_by'] = false;
-            } elseif (in_array('group', $params, true)) {
-                $dailyArgs['group'] = false;
-            }
-            $this->requests = aihelper::getCliApiRequests(...$dailyArgs);
-            $this->applySearch();
-            $this->attachGroups();
-            $this->applyFilters();
-            foreach ($this->requests as $request) {
-                if (($request['time'] ?? null) === null) {
-                    continue;
-                }
-                $day = substr((string) $request['time'], 0, 10);
-                $this->byDay[$day] = ($this->byDay[$day] ?? 0) + (int) ($request['calls'] ?? 1);
-            }
-            ksort($this->byDay);
-            file_put_contents($dailyCacheFile, json_encode($this->byDay, JSON_THROW_ON_ERROR));
-        }
 
         $this->requests = aihelper::getCliApiRequests(...$args);
         $this->applySearch();
-        $this->attachGroups();
         $this->applyFilters();
         $this->aggregate();
         $this->buildChartData();
@@ -319,7 +254,7 @@ final class Admin
 
         $this->renderedAt = (new DateTimeImmutable('now', new DateTimeZone('Europe/Berlin')))->format('Y-m-d H:i:s');
         $this->baseParams = array_filter(
-            ['limit' => $this->limit, 'from' => $this->dateFrom, 'to' => $this->dateUntil, 'q' => $this->search, 'groupby' => $this->groupby !== 'project' ? $this->groupby : ''],
+            ['limit' => $this->limit, 'from' => $this->dateFrom, 'to' => $this->dateUntil, 'q' => $this->search],
             fn($value) => (string) $value !== ''
         );
     }
@@ -347,36 +282,8 @@ final class Admin
         );
     }
 
-    private function attachGroups(): void
-    {
-        foreach ($this->requests as $index => $request) {
-            if (($request['project'] ?? '') !== '') {
-                // project: the working directory (cwd) for local calls, the Referer for proxy calls
-                $groupKey = 'project|' . ($request['source'] ?? 'proxy') . '|' . $request['project'];
-                $groupLabel = $request['project'];
-            } else {
-                // proxy calls without a Referer — fall back to the (readable) prompt
-                [$groupKey, $groupLabel] = $this->promptSignature($request['request_body'] ?? null);
-                // calls whose prompt lies before the log tail window can't be attributed; keep each
-                // session distinct so they stay findable instead of collapsing into one giant "other"
-                if ($groupKey === 'other') {
-                    $project = $request['model'] ?? '?';
-                    $groupLabel = 'unattributed · ' . $project;
-                    $groupKey = 'unattr|' . $project . '|' . basename((string) ($request['file'] ?? (string) $index));
-                }
-            }
-            $this->requests[$index]['group_id'] = substr(md5($groupKey), 0, 8);
-            $this->requests[$index]['group_label'] = $groupLabel;
-        }
-    }
-
     private function applyFilters(): void
     {
-        if ($this->groupFilter !== '') {
-            $this->requests = array_values(
-                array_filter($this->requests, fn($request) => ($request['group_id'] ?? '') === $this->groupFilter)
-            );
-        }
         if ($this->modelFilter !== '') {
             $this->requests = array_values(
                 array_filter($this->requests, fn($request) => ($request['model'] ?? '') === $this->modelFilter)
@@ -392,12 +299,15 @@ final class Admin
     private function aggregate(): void
     {
         $this->byStatus = ['2xx' => 0, '4xx' => 0, '5xx' => 0, 'other' => 0];
-        $promptGroups = [];
         foreach ($this->requests as $request) {
             $in = (int) ($this->tokensIn($request['usage'] ?? []) ?? 0);
             $out = (int) ($this->tokensOut($request['usage'] ?? []) ?? 0);
             $this->sumIn += $in;
             $this->sumOut += $out;
+            if (($request['time'] ?? null) !== null) {
+                $day = substr((string) $request['time'], 0, 10);
+                $this->byDay[$day] = ($this->byDay[$day] ?? 0) + 1;
+            }
             $status = $request['response']['status'] ?? null;
             if ($request['error'] === true || ($status !== null && $status >= 400)) {
                 $this->errors++;
@@ -417,16 +327,9 @@ final class Admin
             } else {
                 $this->byStatus['other']++;
             }
-            $groupId = $request['group_id'];
-            if (!isset($promptGroups[$groupId])) {
-                $promptGroups[$groupId] = ['label' => $request['group_label'], 'tokens' => 0];
-            }
-            $promptGroups[$groupId]['tokens'] += $in + $out;
         }
+        ksort($this->byDay);
         arsort($this->models);
-        // rank prompt groups by cost (total tokens in + out), not by number of calls
-        uasort($promptGroups, fn($a, $b) => $b['tokens'] <=> $a['tokens']);
-        $this->topGroups = array_slice($promptGroups, 0, 12, true);
     }
 
     private function buildChartData(): void
@@ -435,14 +338,7 @@ final class Admin
         $this->chartData = [
             'byDay' => ['labels' => array_keys($this->byDay), 'data' => array_values($this->byDay)],
             'byModel' => ['labels' => array_keys($topModels), 'data' => array_values($topModels)],
-            'byStatus' => ['labels' => array_keys($this->byStatus), 'data' => array_values($this->byStatus)],
-            'byGroup' => [
-                'labels' => array_map(
-                    fn($group) => mb_strlen($group['label']) > 28 ? mb_substr($group['label'], 0, 28) . '…' : $group['label'],
-                    array_values($this->topGroups)
-                ),
-                'data' => array_map(fn($group) => $group['tokens'], array_values($this->topGroups))
-            ]
+            'byStatus' => ['labels' => array_keys($this->byStatus), 'data' => array_values($this->byStatus)]
         ];
     }
 
@@ -797,7 +693,11 @@ final class Admin
         $recentReqByTool = [];
         $turnRows = [];
         $directTurnDurations = [];
-        $rows = aihelper::getCliApiRequests(date_from: date('Y-m-d H:i:s', $now - max($windowSeconds)));
+        $rows = aihelper::getCliApiRequests(
+            limit: $this->limit,
+            date_from: date('Y-m-d H:i:s', $now - max($windowSeconds)),
+            group_by: false
+        );
         foreach ($rows as $row) {
             $ts = strtotime((string) ($row['time'] ?? ''));
             if ($ts === false) {
@@ -929,13 +829,13 @@ final class Admin
         return ['prompt' => $body];
     }
 
-    private function collectText(mixed $body, bool $systemOnly): string
+    private function collectText(mixed $body): string
     {
         $body = $this->normalizeBody($body);
         if (!is_array($body)) {
             return '';
         }
-        if ($systemOnly === false && ($body['messages'] ?? null) === null && is_string($body['prompt'] ?? null)) {
+        if (($body['messages'] ?? null) === null && is_string($body['prompt'] ?? null)) {
             return trim(preg_replace('/\s+/', ' ', $body['prompt']) ?? $body['prompt']);
         }
         $text = '';
@@ -954,10 +854,7 @@ final class Admin
         }
         foreach ($body['messages'] ?? [] as $message) {
             $role = $message['role'] ?? '';
-            if ($systemOnly && $role !== 'system') {
-                continue;
-            }
-            if (!$systemOnly && $role !== 'user') {
+            if ($role !== 'user') {
                 continue;
             }
             $content = $message['content'] ?? '';
@@ -974,9 +871,7 @@ final class Admin
                     }
                 }
             }
-            if (!$systemOnly) {
-                break;
-            }
+            break;
         }
         return trim(preg_replace('/\s+/', ' ', $text) ?? $text);
     }
@@ -985,32 +880,11 @@ final class Admin
     private function promptExcerpt(mixed $body): string
     {
         $body = $this->normalizeBody($body);
-        $text = $this->collectText($body, false);
+        $text = $this->collectText($body);
         if ($text === '' && is_string($body['prompt'] ?? null)) {
             $text = trim(preg_replace('/\s+/', ' ', $body['prompt']) ?? $body['prompt']);
         }
         return mb_strlen($text) > 140 ? mb_substr($text, 0, 140) . '…' : $text;
-    }
-
-    // no source/referrer exists, so derive a stable identity from the prompt itself:
-    // the system prompt is fixed per integration; templated user prompts share a stable prefix
-    private function promptSignature(mixed $body): array
-    {
-        $basis = $this->collectText($body, true);
-        if ($basis === '') {
-            $basis = $this->collectText($body, false);
-        }
-        if ($basis === '') {
-            return ['other', 'other'];
-        }
-        $key = mb_strtolower(mb_substr($basis, 0, 48));
-        $label = mb_strlen($basis) > 70 ? mb_substr($basis, 0, 70) . '…' : $basis;
-        return [$key, $label];
-    }
-
-    private function groupColor(string $id): string
-    {
-        return $this->groupPalette[crc32($id) % count($this->groupPalette)];
     }
 
     private function statusClass(?int $status): string
@@ -1081,9 +955,6 @@ final class Admin
     private function filterHref(array $overrides): string
     {
         $params = $this->baseParams;
-        if ($this->groupFilter !== '') {
-            $params['group'] = $this->groupFilter;
-        }
         if ($this->modelFilter !== '') {
             $params['model'] = $this->modelFilter;
         }
@@ -1300,7 +1171,6 @@ final class Admin
                 <div class="chart-box"><h2>Requests per day</h2><div class="canvas-wrap"><canvas id="chartDay"></canvas></div></div>
                 <div class="chart-box"><h2>Models used</h2><div class="canvas-wrap"><canvas id="chartModel"></canvas></div></div>
                 <div class="chart-box"><h2>Status</h2><div class="canvas-wrap"><canvas id="chartStatus"></canvas></div></div>
-                <div class="chart-box"><h2>Prompt groups (tokens)</h2><div class="canvas-wrap"><canvas id="chartGroup"></canvas></div></div>
             </div>
 
             <div class="models-row">
@@ -1341,16 +1211,13 @@ final class Admin
                 </div>
             </div>
 
-            <?php if ($this->groupFilter !== '' || $this->modelFilter !== '' || $this->sourceFilter !== ''): ?>
+            <?php if ($this->modelFilter !== '' || $this->sourceFilter !== ''): ?>
                 <div class="filter-active">
                     <?php if ($this->sourceFilter !== ''): ?>
                         source: <b><?= $h($this->sourceFilter === 'proxy' ? 'cliproxyapi' : $this->sourceFilter) ?></b> <a href="<?= $h($this->filterHref(['source' => ''])) ?>">✕</a>
                     <?php endif; ?>
                     <?php if ($this->modelFilter !== ''): ?>
                         · model: <b><?= $h($this->modelFilter) ?></b> <a href="<?= $h($this->filterHref(['model' => ''])) ?>">✕</a>
-                    <?php endif; ?>
-                    <?php if ($this->groupFilter !== ''): ?>
-                        · group <a href="<?= $h($this->filterHref(['group' => ''])) ?>">✕</a>
                     <?php endif; ?>
                 </div>
             <?php endif; ?>
@@ -1361,21 +1228,19 @@ final class Admin
                 <div><label>To</label><input type="text" name="to" value="<?= $h($this->dateUntil) ?>" placeholder="2026-07-31 23:59:59" style="width:180px"></div>
                 <div><label>Limit</label><input type="number" name="limit" value="<?= $h($this->limit) ?>" style="width:90px"></div>
                 <div><label>Source</label><select name="source"><option value="" <?= $this->sourceFilter === '' ? 'selected' : '' ?>>all sources</option><option value="proxy" <?= $this->sourceFilter === 'proxy' ? 'selected' : '' ?>>cliproxyapi</option><option value="claude-code" <?= $this->sourceFilter === 'claude-code' ? 'selected' : '' ?>>claude-code</option><option value="codex" <?= $this->sourceFilter === 'codex' ? 'selected' : '' ?>>codex</option><option value="opencode" <?= $this->sourceFilter === 'opencode' ? 'selected' : '' ?>>opencode</option></select></div>
-                <div><label>View</label><select name="groupby"><option value="project" <?= $this->groupby === 'project' ? 'selected' : '' ?>>grouped by project</option><option value="off" <?= $this->groupby === 'off' ? 'selected' : '' ?>>all calls</option></select></div>
                 <button type="submit">Filter</button>
             </form>
 
             <div class="tablewrap">
                 <table>
                     <colgroup>
-                        <col style="width: 150px"><col style="width: 130px"><col style="width: 200px"><col style="width: 180px"><col style="width: 340px"><col style="width: 70px"><col style="width: 70px"><col style="width: 48px">
+                        <col style="width: 150px"><col style="width: 130px"><col style="width: 200px"><col style="width: 520px"><col style="width: 70px"><col style="width: 70px"><col style="width: 48px">
                     </colgroup>
                     <thead>
                     <tr>
                         <th data-sort="text">Time <span class="arrow"></span></th>
                         <th data-sort="text">Source <span class="arrow"></span></th>
                         <th data-sort="text">Model <span class="arrow"></span></th>
-                        <th data-sort="text">Group <span class="arrow"></span></th>
                         <th data-sort="text">Prompt <span class="arrow"></span></th>
                         <th data-sort="num">In <span class="arrow"></span></th>
                         <th data-sort="num">Out <span class="arrow"></span></th>
@@ -1384,7 +1249,7 @@ final class Admin
                     </thead>
                     <tbody>
                     <?php if (empty($this->requests)): ?>
-                        <tr><td colspan="8" class="empty">No requests found.</td></tr>
+                        <tr><td colspan="7" class="empty">No requests found.</td></tr>
                     <?php endif; ?>
                     <?php foreach ($this->requests as $request): ?>
                         <?php
@@ -1394,7 +1259,6 @@ final class Admin
                         $hasRaw = ($request['file'] ?? '') !== '';
                         $rawUrl = $hasRaw ? '?detail=' . rawurlencode($request['file']) : '';
                         $model = $request['model'] ?? null;
-                        $calls = (int) ($request['calls'] ?? 1);
                         // fade rows by age: last hour opacity 1, each older hour -0.1, floor at 0.3
                         $rowTs = ($request['time'] ?? null) !== null ? strtotime((string) $request['time']) : false;
                         $hoursAgo = $rowTs !== false ? (int) floor((time() - $rowTs) / 3600) : 999;
@@ -1404,8 +1268,7 @@ final class Admin
                             <td><?= $h($this->fmtLocal($request['time'] ?? null)) ?></td>
                             <td><a class="src src-<?= $h($source) ?>" href="<?= $h($this->filterHref(['source' => $source])) ?>"><?= $h($sourceLabel) ?></a></td>
                             <td class="model" title="<?= $h($model ?? '') ?>"><?php if ($model !== null): ?><a class="modellink" href="<?= $h($this->filterHref(['model' => $model])) ?>"><?= $h($model) ?></a><?php else: ?>–<?php endif; ?></td>
-                            <td><a class="grouptag" style="background: <?= $this->groupColor($request['group_id']) ?>;" href="<?= $h($this->filterHref(['group' => $request['group_id']])) ?>" title="filter by group: <?= $h($request['group_label']) ?>"><?= $h(mb_strimwidth($request['group_label'], 0, 32, '…')) ?></a></td>
-                            <td class="prompt" title="<?= $h($excerpt) ?>"><?php if ($calls > 1): ?><span class="calls"><?= $calls ?>×</span> <?php endif; ?><?= $excerpt === '' ? '<span class="muted">–</span>' : $h($excerpt) ?></td>
+                            <td class="prompt" title="<?= $h($excerpt) ?>"><?= $excerpt === '' ? '<span class="muted">–</span>' : $h($excerpt) ?></td>
                             <td><?= $fmt($this->tokensIn($request['usage'] ?? [])) ?></td>
                             <td><?= $fmt($this->tokensOut($request['usage'] ?? [])) ?></td>
                             <td><?php if ($hasRaw): ?><a class="rawlink" href="<?= $h($rawUrl) ?>" target="_blank" title="raw log">🔗</a><?php else: ?><span class="muted">–</span><?php endif; ?></td>
