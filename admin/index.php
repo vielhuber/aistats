@@ -418,11 +418,11 @@ final class Admin
     }
 
     // account usage limits via aihelper (reads the oauth auth files, hits the provider usage endpoints)
-    // a tool is listed when its auth file is present, so it never silently disappears on a transient error
+    // a tool is listed when its auth file or dashboard cookie is present, even on a transient error
     private function fetchUsageLimits(): void
     {
         foreach (self::USAGE_TOOL_CONFIG as $toolLabel => $toolConfig) {
-            $hasAuth = false;
+            $hasAuth = $toolLabel === 'OpenCode' && trim((string) getenv('OPENCODE_GO_AUTH_COOKIE')) !== '';
             foreach ($toolConfig[2] as $globPattern) {
                 if (!empty(glob($globPattern))) {
                     $hasAuth = true;
