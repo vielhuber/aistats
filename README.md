@@ -21,3 +21,13 @@ npm run prod
 cp .env.example .env
 vim .env
 ```
+
+## logins
+
+```bash
+cli-proxy-api --config /var/lib/lamp/cliproxyapi/config.yaml --codex-login --no-browser
+cli-proxy-api --config /var/lib/lamp/cliproxyapi/config.yaml --claude-login --no-browser
+cli-proxy-api --config /var/lib/lamp/cliproxyapi/config.yaml --antigravity-login --no-browser
+```
+
+opencode go has no cliproxyapi login: sign in at https://opencode.ai in your browser, copy the value of the `auth` cookie and set it as `OPENCODE_GO_AUTH_COOKIE` in `.env`. aistats reads the account limits with that cookie; renew it when the browser session expires.
