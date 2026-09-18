@@ -5,3 +5,4 @@
 /.env
 /admin/bundle.js
 /admin/bundle.css
+/.cliproxyapi/

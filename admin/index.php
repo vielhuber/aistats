@@ -11,14 +11,14 @@ final class Admin
     private const AUTH_LIFETIME = 180 * 24 * 3600;
     private const AUTO_CREDIT_COOKIE = 'aistats_auto_credit';
     private const AUTO_CREDIT_LIFETIME = 180 * 24 * 3600;
-    private string $logsDir = '/root/.cli-proxy-api/logs';
+    private string $logsDir = __DIR__ . '/../.cliproxyapi/logs';
 
     // provider, calibration model, auth file globs — shared by usage limits, reset credits and the reset action
     private const USAGE_TOOL_CONFIG = [
-        'Codex' => ['openai', 'gpt-5-codex', ['/root/.codex/auth.json', '/root/.cli-proxy-api/codex*.json']],
-        'Claude' => ['anthropic', 'claude-sonnet-4-5-20250929', ['/root/.claude/.credentials.json', '/root/.cli-proxy-api/claude*.json']],
+        'Codex' => ['openai', 'gpt-5-codex', ['/root/.codex/auth.json', __DIR__ . '/../.cliproxyapi/auth/codex*.json']],
+        'Claude' => ['anthropic', 'claude-sonnet-4-5-20250929', ['/root/.claude/.credentials.json', __DIR__ . '/../.cliproxyapi/auth/claude*.json']],
         'OpenCode' => ['opencode', 'opencode-go/glm-5.2', ['/root/.local/share/opencode/opencode.db']],
-        'Antigravity' => ['google', 'antigravity-gemini', ['/root/.gemini/antigravity-cli/antigravity-oauth-token', '/root/.cli-proxy-api/antigravity*.json']]
+        'Antigravity' => ['google', 'antigravity-gemini', ['/root/.gemini/antigravity-cli/antigravity-oauth-token', __DIR__ . '/../.cliproxyapi/auth/antigravity*.json']]
     ];
 
     private string $authUser = '';
@@ -161,7 +161,7 @@ final class Admin
         }
         // allow the proxy log dir plus the local claude/codex session dirs; realpath resolves
         // any traversal so only files inside these roots can be served
-        $allowed = ['/root/.cli-proxy-api/logs', '/root/.claude/projects', '/root/.codex/sessions'];
+        $allowed = [$this->logsDir, '/root/.claude/projects', '/root/.codex/sessions'];
         $target = realpath($detail);
         $ok = false;
         foreach ($allowed as $base) {
@@ -347,7 +347,7 @@ final class Admin
     {
         $apiKeys = [];
         $inKeyBlock = false;
-        foreach (explode("\n", (string) @file_get_contents('/root/cliproxyapi/config.yaml')) as $configLine) {
+        foreach (explode("\n", (string) @file_get_contents(__DIR__ . '/../.cliproxyapi/config.yaml')) as $configLine) {
             if (preg_match('/^api-keys:\s*$/', $configLine)) {
                 $inKeyBlock = true;
                 continue;

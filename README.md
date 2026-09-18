@@ -9,7 +9,7 @@ a small self-hosted dashboard for your cli ai usage: recent requests, token spen
 
 ## requirements
 
-aistats reads the per-request logs of a running [cliproxyapi](https://github.com/router-for-me/CLIProxyAPI) instance with request logging enabled. point a vhost at the project so that `/admin` is served locally by php. if you also want the proxied `/v1` api reachable from outside, expose cliproxyapi through the same host; otherwise leave everything but `/admin` closed.
+aistats reads the per-request logs of a [cliproxyapi](https://github.com/router-for-me/CLIProxyAPI) instance that lives inside the project directory under `.cliproxyapi/` (gitignored): the binary, `config.yaml`, the oauth files in `auth/` and the request logs in `logs/`. point a vhost at the project so that `/admin` is served locally by php. if you also want the proxied `/v1` api reachable from outside, expose cliproxyapi through the same host; otherwise leave everything but `/admin` closed.
 
 ## setup
 
@@ -22,12 +22,26 @@ cp .env.example .env
 vim .env
 ```
 
+## cliproxyapi
+
+```bash
+mkdir -p .cliproxyapi/auth .cliproxyapi/logs
+curl -fsSL https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.159/CLIProxyAPI_7.2.159_linux_amd64.tar.gz | tar -xz -C .cliproxyapi cli-proxy-api config.example.yaml
+sed "s/^request-log: .*/request-log: true/; s|^auth-dir: .*|auth-dir: \"$PWD/.cliproxyapi/auth\"|" .cliproxyapi/config.example.yaml > .cliproxyapi/config.yaml
+(cd .cliproxyapi && ./cli-proxy-api --config config.yaml)
+```
+
+run it with `.cliproxyapi` as working directory so the request logs land in `.cliproxyapi/logs`; use a process supervisor to keep it running.
+
 ## logins
 
 ```bash
-cli-proxy-api --config /var/lib/lamp/cliproxyapi/config.yaml --codex-login --no-browser
-cli-proxy-api --config /var/lib/lamp/cliproxyapi/config.yaml --claude-login --no-browser
-cli-proxy-api --config /var/lib/lamp/cliproxyapi/config.yaml --antigravity-login --no-browser
+cd .cliproxyapi
+./cli-proxy-api --config config.yaml --codex-login --no-browser
+./cli-proxy-api --config config.yaml --claude-login --no-browser
+./cli-proxy-api --config config.yaml --antigravity-login --no-browser
 ```
+
+antigravity's oauth callback expects port `51121` on the machine that opens the browser; forward it when the login runs on a remote host.
 
 opencode go has no cliproxyapi login: sign in at https://opencode.ai in your browser, copy the value of the `auth` cookie and set it as `OPENCODE_GO_AUTH_COOKIE` in `.env`. aistats reads the account limits with that cookie; renew it when the browser session expires.
