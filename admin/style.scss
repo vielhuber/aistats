@@ -152,7 +152,7 @@ a:hover { text-decoration: underline; }
 .src-codex { background: #204a34; }
 .src-opencode { background: #4a3154; }
 
-.charts { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 12px; }
+.charts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 12px; }
 .chart-box { background: #171a21; border: 1px solid #262a33; border-radius: 10px; padding: 16px 18px; }
 .chart-box h2 { margin: 0 0 12px; font-size: 12px; letter-spacing: .04em; color: #8a92a3; }
 .chart-box .canvas-wrap { position: relative; height: 344px; }
